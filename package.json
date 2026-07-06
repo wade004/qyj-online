@@ -1,0 +1,13 @@
+{
+  "name": "qyj-online",
+  "version": "1.0.0",
+  "description": "群英决 · 自托管网页版（英雄对决表现 × 德州竞技内核，单机 + 联机组队对战）",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "web": "npx --yes serve -l 8080 .",
+    "server": "node server/server.mjs 8790",
+    "postinstall": "cd server && npm install",
+    "test": "node test/smoke.mjs && node test/mp_smoke.mjs"
+  }
+}
