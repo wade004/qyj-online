@@ -90,14 +90,14 @@ export function getBlinds(round) {
   return BLIND_SCHEDULE[level - 1];
 }
 
-// 牌面/花色/牌背资源（与 Maker 版共用同一批 PNG）
-export const CARD_FACE_IMG = 'assets/card_face_paper_20260705141642.png';
-export const CARD_BACK_IMG = 'assets/card_back_feng_20260705141642.png';
+// 牌面/花色/牌背资源（noname 素材迁移版）
+export const CARD_FACE_IMG = 'assets/card/handcard.png';
+export const CARD_BACK_IMG = 'assets/card/cardback_scroll.png';
 export const SUIT_IMGS = {
-  1: 'assets/suit_spade_20260705154216.png',
-  2: 'assets/suit_heart_20260705154216.png',
-  3: 'assets/suit_diamond_20260705154216.png',
-  4: 'assets/suit_club_20260705154216.png',
+  1: 'assets/card/lukai_spade.png',
+  2: 'assets/card/lukai_heart.png',
+  3: 'assets/card/lukai_diamond.png',
+  4: 'assets/card/lukai_club.png',
 };
 export const RANK_FACE_IMGS = {
   2: 'assets/rankb_02_20260705150419.png',
@@ -114,4 +114,4 @@ export const RANK_FACE_IMGS = {
   13: 'assets/rankc_K_20260705154216.png',
   14: 'assets/rankc_A_20260705154216.png',
 };
-export const BG_IMG = 'assets/bg_battle_20260705125919.png';
+export const BG_IMG = 'assets/bg/zhulin_bg.jpg';

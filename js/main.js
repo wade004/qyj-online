@@ -10,6 +10,7 @@ import { showHeroSelect } from './ui/heroselect.js';
 import { attachBattle } from './ui/battle.js';
 import { showResult } from './ui/result.js';
 import { startOnline } from './ui/online.js';
+import { initAudio } from './audio.js';
 
 let engine = null;   // 单机引擎
 let battle = null;
@@ -52,8 +53,9 @@ function enterModeSelect() {
       <div style="font-size:11px;color:var(--text-faint);margin-top:10px">
         联机模式需要对战服务器在线（web/server：node server.mjs）</div>
     </div>`;
-  el.querySelector('.mode-sp').addEventListener('click', () => enterSelect());
+  el.querySelector('.mode-sp').addEventListener('click', () => { initAudio(); enterSelect(); });
   el.querySelector('.mode-mp').addEventListener('click', () => {
+    initAudio();
     online = startOnline(() => enterModeSelect());
   });
   app.replaceChildren(el);

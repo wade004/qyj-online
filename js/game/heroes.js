@@ -2,13 +2,15 @@
 // heroes.js - 首发六英雄（与 Maker 版 Heroes.lua 一一对应）
 // ============================================================================
 
-const P = (n) => `assets/${n}`;
+const P = (n) => `assets/heroes/${n}`;
+const C = (n) => `assets/characters/${n}`;
 
 export const HEROES = [
   {
     id: 'zhugeliang', name: '诸葛亮', type: '侦查',
+    gender: 'male',
     color: '#7fd4ff',
-    portrait: P('hero_zhugeliang_20260705125919.png'),
+    portrait: C('zhuge_liang.png'),
     skillName: '观天', skillCost: 2,
     skillDesc: '窥探下一道天机',
     condDesc: '令含黑桃♠',
@@ -20,8 +22,9 @@ export const HEROES = [
   },
   {
     id: 'diaochan', name: '貂蝉', type: '侦查',
+    gender: 'female',
     color: '#c58bff',
-    portrait: P('hero_diaochan_20260705125919.png'),
+    portrait: C('diao_chan.png'),
     skillName: '魅惑', skillCost: 3,
     skillDesc: '窥视一名对手一枚杀招令',
     condDesc: '令含A/K/Q',
@@ -33,8 +36,9 @@ export const HEROES = [
   },
   {
     id: 'hanxin', name: '韩信', type: '换牌',
+    gender: 'male',
     color: '#ff9d76',
-    portrait: P('hero_hanxin_20260705125919.png'),
+    portrait: C('han_xin.png'),
     skillName: '暗度陈仓', skillCost: 2,
     skillDesc: '弃换一枚杀招令',
     condDesc: '两令花色不同',
@@ -46,8 +50,9 @@ export const HEROES = [
   },
   {
     id: 'xiangyu', name: '项羽', type: '控制',
+    gender: 'male',
     color: '#ff6b6b',
-    portrait: P('hero_xiangyu_20260705125919.png'),
+    portrait: C('xiang_yu.png'),
     skillName: '威压', skillCost: 2,
     skillDesc: '本轮对手不得加注（决死除外）',
     condDesc: '令含J/Q/K',
@@ -59,8 +64,9 @@ export const HEROES = [
   },
   {
     id: 'lvbuwei', name: '吕不韦', type: '经济',
+    gender: 'male',
     color: '#f6c343',
-    portrait: P('hero_lvbuwei_20260705125919.png'),
+    portrait: C('lv_buwei.png'),
     skillName: '奇货可居', skillCost: 3,
     skillDesc: '本回合获胜额外+30%血池',
     condDesc: '两令阶数和≥20（A=14）',
@@ -72,8 +78,9 @@ export const HEROES = [
   },
   {
     id: 'lianpo', name: '廉颇', type: '防御',
+    gender: 'male',
     color: '#54d97c',
-    portrait: P('hero_lianpo_20260705125919.png'),
+    portrait: C('lian_po.png'),
     skillName: '坚壁', skillCost: 2,
     skillDesc: '本回合亮招若败返还50%气血',
     condDesc: '令含红桃♥',

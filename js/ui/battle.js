@@ -7,6 +7,7 @@ import { describe } from '../game/handeval.js';
 import * as WinRate from '../game/winrate.js';
 import { cardText } from '../game/engine.js';
 import * as FX from './effects.js';
+import { playSFX } from '../audio.js';
 
 const h = (html) => {
   const t = document.createElement('template');
@@ -502,6 +503,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     resetRoundUI(dealerIdx);
   };
   listeners.onDeal = () => {
+    playSFX('draw');
     if (me.alive && me.hole.length >= 2) {
       pToks[0].setCard(me.hole[0]);
       pToks[1].setCard(me.hole[1]);
@@ -534,6 +536,11 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       seats[idx].seat.classList.add('folded');
     } else if (key === 'allin') {
       setStatus(idx, '决死！', 'var(--red)');
+      playSFX('equip');
+    } else if (key === 'call' || key === 'check') {
+      playSFX('drawx');
+    } else if (key.startsWith('raise')) {
+      playSFX('draw');
     }
     if (idx === myIdx) hideActionUI();
   };
@@ -551,7 +558,18 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     refreshAdvice();
     refreshSkillPanel();
   };
-  listeners.onHpChange = updateHp;
+  listeners.onHpChange = (idx) => {
+    const p = players[idx];
+    const oldHp = seats[idx].hpFill.style.width;
+    updateHp(idx);
+    // Play damage/recover sound based on HP change
+    const newPct = Math.max(0, Math.min(1, p.hp / Config.INIT_HP));
+    if (oldHp && oldHp !== '') {
+      const oldPct = parseFloat(oldHp) / 100;
+      if (newPct < oldPct) playSFX(p.hero.gender === 'female' ? 'damageFemale' : 'damageMale');
+      else if (newPct > oldPct) playSFX('recover');
+    }
+  };
   listeners.onEnergyChange = updateEnergy;
   listeners.onHoleChange = (idx) => {
     if (idx === myIdx) {
@@ -561,6 +579,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     }
   };
   listeners.onSkill = (idx, skillName) => {
+    playSFX('judge');
     FX.banner(skillName, `${players[idx].hero.name} · ${players[idx].hero.type}`, 'var(--purple)');
   };
   listeners.onQuote = (idx, text) => FX.bubble(seats[idx].seat, text);
@@ -618,6 +637,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     potEl.textContent = '血池 0';
   };
   listeners.onDeath = (idx) => {
+    playSFX(players[idx].hero.gender === 'female' ? 'dieFemale' : 'die');
     seats[idx].seat.classList.add('dead');
     FX.deathStamp(seats[idx].seat);
     setStatus(idx, '', '');
