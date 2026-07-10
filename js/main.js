@@ -6,11 +6,11 @@
 import { Engine } from './game/engine.js';
 import { HEROES } from './game/heroes.js';
 import { shuffle } from './game/deck.js';
-import { showHeroSelect } from './ui/heroselect.js';
-import { attachBattle } from './ui/battle.js';
+import { showHeroSelect } from './ui/heroselect.js?v=16-heroes';
+import { attachBattle } from './ui/battle.js?v=pot-metrics';
 import { showResult } from './ui/result.js';
 import { startOnline } from './ui/online.js';
-import { initAudio } from './audio.js';
+import { bindAudioToggle, initAudio } from './audio.js';
 
 let engine = null;   // 单机引擎
 let battle = null;
@@ -22,7 +22,7 @@ function startBattle(heroId) {
   const rest = shuffle(HEROES.filter((h) => h.id !== heroId).map((h) => h.id));
   const ids = [heroId, ...rest.slice(0, 5)];
   const listeners = {};
-  engine = new Engine(ids, listeners);
+  engine = new Engine(ids, listeners, null, {}, { endWhenHumanEliminated: true });
   battle = attachBattle(engine, listeners, 1, (ranking) => {
     engine = null;
     battle = null;
@@ -76,5 +76,6 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 
+bindAudioToggle(document.getElementById('audio-toggle'));
 enterModeSelect();
 requestAnimationFrame(loop);

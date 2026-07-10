@@ -21,7 +21,7 @@ export function estimate(hole, board, numOpponents, sims) {
 
   const myCards = [hole[0], hole[1], null, null, null, null, null];
   const oppCards = new Array(7);
-  let wins = 0, ties = 0;
+  let equitySum = 0;
 
   for (let s = 0; s < sims; s++) {
     // 部分 Fisher-Yates：只洗出前 need 张
@@ -33,7 +33,7 @@ export function estimate(hole, board, numOpponents, sims) {
     for (let i = 0; i < boardNeed; i++) myCards[2 + board.length + i] = rest[i];
     const myScore = score7(myCards);
 
-    let bestOpp = -1;
+    let bestOpp = -1, bestOppCount = 0;
     let idx = boardNeed;
     for (let o = 0; o < numOpponents; o++) {
       oppCards[0] = rest[idx];
@@ -41,10 +41,15 @@ export function estimate(hole, board, numOpponents, sims) {
       idx += 2;
       for (let i = 2; i < 7; i++) oppCards[i] = myCards[i];
       const sc = score7(oppCards);
-      if (sc > bestOpp) bestOpp = sc;
+      if (sc > bestOpp) {
+        bestOpp = sc;
+        bestOppCount = 1;
+      } else if (sc === bestOpp) {
+        bestOppCount++;
+      }
     }
-    if (myScore > bestOpp) wins++;
-    else if (myScore === bestOpp) ties++;
+    if (myScore > bestOpp) equitySum += 1;
+    else if (myScore === bestOpp) equitySum += 1 / (bestOppCount + 1);
   }
-  return (wins + ties * 0.5) / sims;
+  return equitySum / sims;
 }

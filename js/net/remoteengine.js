@@ -5,7 +5,8 @@
 // ============================================================================
 
 import * as Config from '../game/config.js';
-import { getHero, HEROES, checkCondition } from '../game/heroes.js';
+import { getHero, HEROES } from '../game/heroes.js';
+import { getSkillAvailability, getSkillInput } from '../game/skills.js';
 
 const card = (c) => ({ rank: c.r, suit: c.s });
 
@@ -35,13 +36,19 @@ export class RemoteEngine {
         betStreet: 0,
         betRound: 0,
         skillUsed: false,
+        skillStatuses: [],
+        passiveUsed: Object.create(null),
+        skillData: { flags: Object.create(null), copiedPassiveIds: [], revealedCard: null, raisedThisRound: false },
         showdownInfo: null,
       };
     }
     this.board = [];
     this.revealed = 0;
     this.round = 0;
+    this.street = 'idle';
     this.pot = 0;
+    this.potLayers = [{ label: '主池', amount: 0, kind: 'main' }];
+    this.potDisplay = [{ label: '当前血池', amount: 0, kind: 'main' }];
     this.waitingIdx = null;
     this.gameOver = false;
     this.time = 0;
@@ -51,17 +58,24 @@ export class RemoteEngine {
   // ---- 与本地 Engine 对齐的查询接口 ----
 
   totalPot() { return this.pot; }
+  getPotBreakdown() { return this.potLayers; }
+  getPotDisplay(includeReference = true) {
+    return includeReference
+      ? this.potDisplay
+      : this.potDisplay.filter((item) => item.kind !== 'reference');
+  }
   revealedBoard() { return this.board.slice(0, this.revealed); }
   activePlayers() {
     return this.players.slice(1).filter((p) => p.alive && !p.folded);
   }
   canUseSkill(idx) {
-    const p = this.players[idx];
-    if (!p || this.gameOver || !p.alive || p.folded || p.skillUsed) return false;
-    if (this.round <= 0) return false;
-    if (p.energy < p.hero.skillCost) return false;
-    if (p.hole.length < 2) return false;
-    return checkCondition(p.hero.id, p.hole);
+    return getSkillAvailability(this, this.players[idx]).ok;
+  }
+  skillAvailability(idx) {
+    return getSkillAvailability(this, this.players[idx]);
+  }
+  getSkillPrompt(idx) {
+    return getSkillInput(this, this.players[idx]);
   }
 
   // ---- 行动转发 ----
@@ -69,8 +83,8 @@ export class RemoteEngine {
   playerAct(act) {
     this.send({ cmd: 'act', type: act.type, tierKey: act.tier ? act.tier.key : undefined });
   }
-  useSkill(idx, extra = null) {
-    this.send({ cmd: 'skill', cardIdx: extra ? extra.cardIdx : undefined });
+  useSkill(idx, selection = null) {
+    this.send({ cmd: 'skill', selection: selection || undefined });
     return true;
   }
   extendTime() {
@@ -94,7 +108,10 @@ export class RemoteEngine {
   applySnapshot(s) {
     if (!s) return;
     this.round = s.round ?? this.round;
+    this.street = s.street ?? this.street;
     this.pot = s.pot ?? this.pot;
+    if (s.potLayers) this.potLayers = s.potLayers.map((layer) => ({ ...layer }));
+    if (s.potDisplay) this.potDisplay = s.potDisplay.map((item) => ({ ...item }));
     this.waitingIdx = s.waitingIdx ?? null;
     this.revealed = s.revealed ?? this.revealed;
     if (s.board) this.board = s.board.map(card);
@@ -106,6 +123,7 @@ export class RemoteEngine {
         p.folded = sp.folded; p.allIn = sp.allIn;
         p.betStreet = sp.betStreet; p.betRound = sp.betRound;
         p.skillUsed = sp.skillUsed;
+        p.skillStatuses = (sp.skillModifiers || []).map((status) => ({ ...status }));
       }
     }
   }
@@ -133,6 +151,18 @@ export class RemoteEngine {
       if (L.onGameOver) L.onGameOver(ranking);
       return;
     }
+    if (ev === 'onAllInReveal') {
+      const entrants = [];
+      for (const item of a.entrants || []) {
+        const p = this.players[item.seat];
+        if (!p) continue;
+        p.hole = (item.hole || []).map(card);
+        entrants.push(p);
+      }
+      if (L.onAllInReveal) L.onAllInReveal(entrants);
+      if (L.onSync) L.onSync();
+      return;
+    }
     if (ev === 'onShowdown') {
       const entrants = [];
       for (const e of a.entrants || []) {
@@ -145,7 +175,11 @@ export class RemoteEngine {
       }
       const wonAmount = {};
       for (const [k, v] of Object.entries(a.won || {})) wonAmount[Number(k)] = v;
-      if (L.onShowdown) L.onShowdown({ entrants, wonAmount, totalPot: a.totalPot || 0 });
+      const netResult = {};
+      for (const [k, v] of Object.entries(a.net || {})) netResult[Number(k)] = v;
+      if (L.onShowdown) L.onShowdown({
+        entrants, wonAmount, netResult, totalPot: a.totalPot || 0, pots: a.pots || [],
+      });
       return;
     }
 
@@ -159,11 +193,24 @@ export class RemoteEngine {
         case 'onAwaitAction': handler(a.idx, a.opts, a.remain); break;
         case 'onAction': handler(a.idx, a.key, a.amount); break;
         case 'onStreet': handler(a.street, a.revealTo); break;
-        case 'onSkill': handler(a.idx, a.skillName); break;
+        case 'onSkill': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
+        case 'onPassive': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
+        case 'onSkillEffect': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
         case 'onQuote': handler(a.idx, a.text); break;
-        case 'onPeek': handler(a.idx, card(a.card), a.slot); break;
-        case 'onSpy': handler(a.idx, a.targetIdx, a.cardIdx, card(a.card)); break;
-        case 'onPotAwarded': handler(a.winners, a.amount, a.uncontested, a.bonus); break;
+        case 'onSkillResult': {
+          const result = { ...a.result };
+          if (result.card) result.card = card(result.card);
+          handler(a.idx, result);
+          break;
+        }
+        case 'onSkillPublicResult': {
+          const result = { ...a.result };
+          if (result.card) result.card = card(result.card);
+          handler(a.idx, result);
+          break;
+        }
+        case 'onPotAwarded':
+          handler(a.winners, a.amount, a.uncontested, a.bonus, a.netWinnings); break;
         case 'onDeath': handler(a.idx); break;
         case 'onRoundEnd': handler(a.round); break;
         case 'onDeal': handler(); break;

@@ -5,6 +5,7 @@
 import * as Config from '../game/config.js';
 import { describe } from '../game/handeval.js';
 import * as WinRate from '../game/winrate.js';
+import * as Advisor from '../game/advisor.js?v=pot-metrics';
 import { cardText } from '../game/engine.js';
 import * as FX from './effects.js';
 import { playSFX } from '../audio.js';
@@ -14,6 +15,31 @@ const h = (html) => {
   t.innerHTML = html.trim();
   return t.content.firstElementChild;
 };
+
+const ATTACK_NAME_BY_KEY = Object.fromEntries(
+  Config.ATTACK_TIERS.map((tier) => [tier.key, tier.name]),
+);
+
+export function formatActionHint(key, amount = 0, allIn = false) {
+  const value = Math.max(0, Math.round(Number(amount) || 0));
+  const withAmount = (label) => value > 0 ? `${label} ${value}` : label;
+  if (key === 'smallBlind') return withAmount('小盲');
+  if (key === 'bigBlind') return withAmount('大盲');
+  if (key === 'fold') return '退避';
+  if (key === 'check') return '静观';
+  if (key === 'call') return withAmount(allIn ? '决死应战' : '应战');
+  if (key === 'allin') return withAmount('决死');
+  if (ATTACK_NAME_BY_KEY[key]) return withAmount(ATTACK_NAME_BY_KEY[key]);
+  return value > 0 ? `已投入 ${value}` : '';
+}
+
+function actionHintTone(key, allIn = false) {
+  if (key === 'fold') return 'fold';
+  if (key === 'smallBlind' || key === 'bigBlind') return 'blind';
+  if (key === 'allin' || allIn) return 'allin';
+  if (ATTACK_NAME_BY_KEY[key]) return 'attack';
+  return 'defend';
+}
 
 // ---------------- 杀招令卡牌组件 ----------------
 
@@ -117,6 +143,10 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       <span class="tb-round">第 1/${Config.MAX_ROUNDS} 回合</span>
       <span class="tb-blind">血祭 10/20</span>
       <span class="tb-spacer"></span>
+      <label class="advisor-toggle" title="显示或隐藏本地策略建议">
+        <input class="advisor-toggle-input" type="checkbox" checked>
+        <span>AI辅助</span>
+      </label>
       <span class="tb-hp">你的气血 ${Config.INIT_HP}</span>
       <span class="tb-energy">能量 ⚡${Config.INIT_ENERGY}</span>
     </div>
@@ -150,6 +180,15 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       </div>
       <div class="bb-spacer"></div>
       <div class="bb-right">
+        <div class="gto-advice" aria-live="polite">
+          <div class="ga-head">
+            <span class="ga-label">GTO近似</span>
+            <span class="ga-confidence"></span>
+          </div>
+          <div class="ga-options"></div>
+          <div class="ga-reason"></div>
+          <div class="ga-meta"></div>
+        </div>
         <div class="strength-row">
           <span class="st-label">胜算</span>
           <div class="strength-outer"><div class="strength-bar"></div></div>
@@ -266,6 +305,10 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     potEl = $('.pot'), peekEl = $('.peek'),
     curHandEl = $('.cur-hand'),
     stBar = $('.strength-bar'), stTxt = $('.strength-txt'),
+    adviceEl = $('.gto-advice'), adviceOptions = $('.ga-options'),
+    adviceConfidence = $('.ga-confidence'), adviceReason = $('.ga-reason'),
+    adviceMeta = $('.ga-meta'),
+    advisorToggle = $('.advisor-toggle-input'),
     timerRow = $('.timer-row'), timerBar = $('.timer-bar'), timerTxt = $('.timer-txt'),
     extendBtn = $('.extend-btn'),
     skillBtn = $('.sk-btn'), skillState = $('.sk-state');
@@ -286,12 +329,58 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     seats[idx].enEl.textContent = `⚡${p.energy}`;
     if (idx === myIdx) topEnergy.textContent = `能量 ⚡${p.energy}`;
   }
+  const actionHints = new Map();
+
+  function setActionHint(idx, key, amount = 0) {
+    const allIn = Boolean(players[idx]?.allIn);
+    actionHints.set(idx, {
+      text: formatActionHint(key, amount, allIn),
+      tone: actionHintTone(key, allIn),
+    });
+    updateBet(idx);
+  }
+
+  function clearActionHints() {
+    actionHints.clear();
+    for (let i = 1; i <= Config.PLAYER_COUNT; i++) updateBet(i);
+  }
+
   function updateBet(idx) {
     const p = players[idx];
-    seats[idx].betEl.innerHTML = p.betStreet > 0 ? `⚔ 灌注 ${p.betStreet}` : '&nbsp;';
+    const el = seats[idx].betEl;
+    const hint = actionHints.get(idx);
+    el.classList.remove('action-fold', 'action-blind', 'action-allin', 'action-attack', 'action-defend');
+    if (hint?.text) {
+      el.textContent = `⚔ ${hint.text}`;
+      el.classList.add(`action-${hint.tone}`);
+    } else if (p.betStreet > 0) {
+      el.textContent = `⚔ 已投入 ${p.betStreet}`;
+    } else {
+      el.textContent = '\u00a0';
+    }
+  }
+  function renderPotLayers(layers) {
+    potEl.replaceChildren(...layers.map((layer) => {
+      const actor = layer.actorIdx ? players[layer.actorIdx] : null;
+      const ratioText = layer.wagerAmount > 0 && layer.amount > 0
+        ? `${Math.round(layer.ratio * 100)}%池` : '';
+      const detail = layer.wagerAmount > 0
+        ? `<em>${actor?.hero?.name || ''}下注 ${layer.wagerAmount}${ratioText ? ` · ${ratioText}` : ''}</em>`
+        : '<em>本阶段暂无主动下注</em>';
+      return h(`<span class="pot-layer ${layer.kind || 'main'}">
+        <span class="pot-value"><small>${layer.label}</small><strong>${layer.amount}</strong></span>
+        ${layer.kind === 'reference' ? detail : ''}
+      </span>`);
+    }));
+  }
+  function clearPot() {
+    renderPotLayers([{ label: '当前血池', amount: 0, kind: 'main' }]);
   }
   function updatePot() {
-    potEl.textContent = `血池 ${engine.totalPot()}`;
+    const showReference = engine.waitingIdx === myIdx;
+    const layers = engine.getPotDisplay?.(showReference)
+      || [{ label: '当前血池', amount: engine.totalPot(), kind: 'main' }];
+    renderPotLayers(layers);
   }
   function refreshAll() {
     for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
@@ -326,7 +415,46 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     turnIdx = null;
   }
 
-  // ---- 胜算 / 当前杀招 ----
+  let adviceCacheKey = '', adviceCache = null;
+  let advisorEnabled = true;
+  try {
+    advisorEnabled = localStorage.getItem('qyj-ai-assist') !== 'off';
+  } catch {
+    // Local analysis still works when storage is unavailable.
+  }
+  advisorToggle.checked = advisorEnabled;
+
+  function hideDecisionAdvice() {
+    adviceEl.className = 'gto-advice';
+  }
+
+  function renderDecisionAdvice(advice) {
+    if (!advice) {
+      hideDecisionAdvice();
+      return;
+    }
+    const confidenceLabels = { high: '高把握', medium: '中等把握', low: '低频分支' };
+    adviceEl.className = `gto-advice show ${advice.tone}`;
+    adviceConfidence.textContent = confidenceLabels[advice.confidence] || '';
+    adviceOptions.replaceChildren(...advice.suggestions.slice(0, 3).map((suggestion, index) => {
+      const option = document.createElement('span');
+      option.className = `ga-option${index === 0 ? ' primary' : ''}`;
+      const rank = document.createElement('b');
+      rank.textContent = String(index + 1);
+      const action = document.createElement('strong');
+      action.textContent = suggestion.label;
+      const frequency = document.createElement('em');
+      frequency.textContent = `${suggestion.frequency}%`;
+      option.append(rank, action, frequency);
+      return option;
+    }));
+    adviceReason.textContent = advice.reason;
+    const meta = [advice.metrics];
+    if (advice.suggestions.length > 1) meta.push(advice.mixed ? '混合频率节点' : '低频备选');
+    adviceMeta.textContent = meta.filter(Boolean).join(' · ');
+  }
+
+  // ---- 胜算 / 当前杀招 / 决策建议 ----
   function refreshAdvice() {
     const p = me;
     if (!p || p.hole.length < 2) return;
@@ -343,11 +471,25 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       if (c === p.hole[1]) pToks[1].highlight(true);
       board.forEach((bc, i) => { if (c === bc) boardToks[i].highlight(true); });
     }
+    let decisionAdvice = null;
+    if (advisorEnabled && awaiting && lastOpts && engine.waitingIdx === myIdx) {
+      const key = Advisor.decisionKey(engine, p, lastOpts);
+      if (key !== adviceCacheKey) {
+        adviceCacheKey = key;
+        adviceCache = Advisor.analyzeDecision(engine, p, lastOpts);
+      }
+      decisionAdvice = adviceCache;
+      renderDecisionAdvice(decisionAdvice);
+    } else {
+      hideDecisionAdvice();
+    }
+
     // 胜算（demo-v2 四档）
     if (!p.folded && p.alive) {
       const opp = engine.activePlayers().length - 1;
       if (opp >= 1) {
-        const wr = WinRate.estimate(p.hole, board, opp, Config.PLAYER_SIMS);
+        const wr = decisionAdvice?.equity
+          ?? WinRate.estimate(p.hole, board, opp, Config.PLAYER_SIMS);
         const pct = Math.round(wr * 100);
         let verdict, cls;
         if (pct < 30) { verdict = '劣势'; cls = 'st-bad'; }
@@ -373,8 +515,19 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
   const acts = {};
   let awaiting = false, timeLeft = 0, lastOpts = null;
 
+  advisorToggle.addEventListener('change', () => {
+    advisorEnabled = advisorToggle.checked;
+    try {
+      localStorage.setItem('qyj-ai-assist', advisorEnabled ? 'on' : 'off');
+    } catch {
+      // Keep the switch functional for this session when storage is unavailable.
+    }
+    refreshAdvice();
+  });
+
   function hideActionUI() {
     awaiting = false;
+    hideDecisionAdvice();
     for (const b of Object.values(btns)) b.disabled = true;
     extendBtn.disabled = true;
     timerRow.style.visibility = 'hidden';
@@ -405,8 +558,8 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       acts.call = { type: 'call' };
     }
     btns.call.disabled = false;
-    acts.allin = { type: 'allin' };
-    btns.allin.disabled = false;
+    acts.allin = opts.canAllIn === false ? null : { type: 'allin' };
+    btns.allin.disabled = opts.canAllIn === false;
     const byKey = {};
     for (const tier of opts.tiers) byKey[tier.key] = tier;
     const slotMap = { raiseS: 'feint', raiseM: 'strike', raiseL: 'fierce' };
@@ -428,54 +581,69 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
 
   // ---- 技能 ----
   function refreshSkillPanel() {
-    const can = engine.canUseSkill(myIdx);
-    skillBtn.disabled = !can;
-    let msg;
-    if (me.skillUsed) msg = '本回合已发动';
-    else if (!me.alive) msg = '已阵亡';
-    else if (me.folded) msg = '已退避';
-    else if (me.energy < me.hero.skillCost) msg = `能量不足（${me.energy}/${me.hero.skillCost}⚡）`;
-    else if (me.hole.length >= 2 && !can) msg = `条件未满足：${me.hero.condDesc}`;
-    else if (can) msg = '✓ 条件已满足，可以发动';
-    else msg = '';
-    skillState.textContent = msg;
-    skillState.classList.toggle('ok', can);
+    const availability = engine.skillAvailability(myIdx);
+    skillBtn.disabled = !availability.ok;
+    const cost = availability.cost ?? me.hero.skillCost;
+    skillBtn.textContent = `${me.hero.skillName}（${cost}⚡）`;
+    skillState.textContent = availability.reason || '';
+    skillState.classList.toggle('ok', availability.ok);
   }
+
+  function openSkillChoice(input) {
+    const mask = h(`<div class="result-mask skill-choice-mask">
+      <div class="result-box skill-choice-box">
+        <h1>${input.title}</h1>
+        <div class="skill-choice-step"></div>
+        <div class="skill-choice-list"></div>
+      </div>
+    </div>`);
+    const list = mask.querySelector('.skill-choice-list');
+    const step = mask.querySelector('.skill-choice-step');
+    const selection = {};
+    const fields = input.fields || [];
+    const renderField = (index) => {
+      const field = fields[index];
+      if (!field) {
+        mask.remove();
+        engine.useSkill(myIdx, selection);
+        return;
+      }
+      step.textContent = fields.length > 1 ? `${index + 1}/${fields.length} · ${field.label}` : field.label;
+      list.replaceChildren();
+      for (const option of field.options || []) {
+        const button = h(`<button class="skill-choice-option">
+          <strong>${option.label}</strong>
+          <span>${option.description || ''}</span>
+        </button>`);
+        button.addEventListener('click', () => {
+          selection[field.key] = option.value;
+          renderField(index + 1);
+        });
+        list.appendChild(button);
+      }
+    };
+    mask.addEventListener('click', (event) => {
+      if (event.target === mask) mask.remove();
+    });
+    screen.appendChild(mask);
+    renderField(0);
+  }
+
   skillBtn.addEventListener('click', () => {
     if (!engine.canUseSkill(myIdx)) return;
-    if (me.hero.id === 'hanxin') {
-      // 暗度陈仓：选择弃换哪枚
-      const mask = h(`<div class="result-mask" style="z-index:50;background:rgba(0,0,0,.5)">
-        <div class="result-box" style="width:340px">
-          <h1 style="font-size:18px;letter-spacing:2px">暗度陈仓 · 选择弃换的杀招令</h1>
-          <div class="hand-cards" style="display:flex;gap:20px"></div>
-        </div></div>`);
-      const box = mask.querySelector('.hand-cards');
-      for (let i = 1; i <= 2; i++) {
-        const t = makeCard('card-mini');
-        t.setCard(me.hole[i - 1]);
-        t.el.style.cursor = 'pointer';
-        t.el.style.width = '84px';
-        t.el.style.height = '118px';
-        t.el.addEventListener('click', () => {
-          mask.remove();
-          engine.useSkill(myIdx, { cardIdx: i });
-        });
-        box.appendChild(t.el);
-      }
-      mask.addEventListener('click', (e) => { if (e.target === mask) mask.remove(); });
-      screen.appendChild(mask);
-    } else {
-      engine.useSkill(myIdx);
-    }
+    const input = engine.getSkillPrompt(myIdx);
+    if (input && input.fields?.length) openSkillChoice(input);
+    else engine.useSkill(myIdx);
   });
 
   // ---- 回合重置 ----
   function resetRoundUI(dealerIdx) {
+    actionHints.clear();
     for (const [iStr, s] of Object.entries(seats)) {
       const i = Number(iStr);
       const p = players[i];
-      s.betEl.innerHTML = '&nbsp;';
+      s.betEl.textContent = '\u00a0';
+      s.betEl.classList.remove('action-fold', 'action-blind', 'action-allin', 'action-attack', 'action-defend');
       s.handEl.textContent = '';
       s.seat.classList.remove('folded');
       if (p.alive) setStatus(i, '');
@@ -489,7 +657,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     }
     boardToks.forEach((t, i) => { t.faceDown(Config.BOARD_SLOT_NAMES[i + 1]); t.highlight(false); });
     hideTurnBars();
-    potEl.textContent = '血池 0';
+    clearPot();
     peekEl.textContent = '';
     hideActionUI();
   }
@@ -511,8 +679,10 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     refreshAdvice();
     refreshSkillPanel();
   };
-  listeners.onBlindsPosted = (sbIdx, sbAmt, bbIdx) => {
-    updateBet(sbIdx); updateBet(bbIdx); updatePot();
+  listeners.onBlindsPosted = (sbIdx, sbAmt, bbIdx, bbAmt) => {
+    setActionHint(sbIdx, 'smallBlind', sbAmt);
+    setActionHint(bbIdx, 'bigBlind', bbAmt);
+    updatePot();
   };
   listeners.onTurnStart = (idx) => {
     highlightTurn(idx);
@@ -527,10 +697,11 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     extendBtn.disabled = me.energy < Config.EXTEND_COST;
     refreshAdvice();
     refreshSkillPanel();
+    updatePot();
   };
-  listeners.onAction = (idx, key) => {
+  listeners.onAction = (idx, key, amount = 0) => {
     hideTurnBars();
-    updateBet(idx); updatePot();
+    setActionHint(idx, key, amount); updatePot();
     if (key === 'fold') {
       setStatus(idx, '退避', 'var(--text-faint)');
       seats[idx].seat.classList.add('folded');
@@ -539,7 +710,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       playSFX('equip');
     } else if (key === 'call' || key === 'check') {
       playSFX('drawx');
-    } else if (key.startsWith('raise')) {
+    } else if (ATTACK_NAME_BY_KEY[key]) {
       playSFX('draw');
     }
     if (idx === myIdx) hideActionUI();
@@ -552,7 +723,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
         t.revealAnim();
       }
     }
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) updateBet(i);
+    clearActionHints();
     updatePot();
     peekEl.textContent = '';
     refreshAdvice();
@@ -578,32 +749,88 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       refreshAdvice();
     }
   };
-  listeners.onSkill = (idx, skillName) => {
-    playSFX('judge');
-    FX.banner(skillName, `${players[idx].hero.name} · ${players[idx].hero.type}`, 'var(--purple)');
+  listeners.onSkill = (idx, skillId, skillName, presentation = {}) => {
+    playSFX(presentation.sfx || 'judge');
+    FX.banner(skillName, `${players[idx].hero.name} · ${players[idx].hero.type}`, presentation.tone || 'var(--purple)');
+  };
+  listeners.onPassive = (idx, skillId, skillName, presentation = {}) => {
+    playSFX(presentation.sfx || 'draw');
+    const [x, y] = FX.centerOf(seats[idx].seat);
+    FX.floatText(x, y - 20, `【${skillName}】`, presentation.tone || 'var(--gold-bright)', 16);
+  };
+  listeners.onSkillEffect = (idx, skillId, skillName, presentation = {}) => {
+    playSFX(presentation.sfx || 'recover');
+    const [x, y] = FX.centerOf(seats[idx].seat);
+    FX.floatText(x, y - 20, `【${skillName}】生效`, presentation.tone || 'var(--gold-bright)', 16);
   };
   listeners.onQuote = (idx, text) => FX.bubble(seats[idx].seat, text);
-  listeners.onPeek = (idx, card) => {
-    peekEl.textContent = `👁 观天 · 下一道天机：${cardText(card)}`;
+  listeners.onSkillResult = (idx, result) => {
+    if (idx !== myIdx || !result) return;
+    if (result.kind === 'peek_board') {
+      peekEl.textContent = `观天 · 下一道天机：${cardText(result.card)}`;
+    } else if (result.kind === 'peek_hole') {
+      const t = seats[result.targetIdx].revealToks[result.cardIdx - 1];
+      t.setCard(result.card);
+      t.el.style.display = '';
+      t.el.style.borderColor = 'var(--purple)';
+      t.el.style.boxShadow = '0 0 10px rgba(197,139,255,.6)';
+      addLog(`魅惑窥视：${result.targetIdx}号位 ${players[result.targetIdx].hero.name} 的一枚暗令是 ${cardText(result.card)}`, 'skill');
+    } else if (result.kind === 'prediction') {
+      const labels = {
+        showdown: '亮招决胜', uncontested: '兵不血刃', fold: '退避',
+        defend: '守势', attack: '攻势', red: '红色', black: '黑色',
+        low: '一对及以下', high: '两对及以上',
+      };
+      peekEl.textContent = `技能预测 · 已选择：${labels[result.choice] || result.choice}`;
+    } else if (result.kind === 'peek_board_suit') {
+      peekEl.textContent = `望月 · 下一道天机花色：${Config.SUITS[result.suit].name}`;
+    } else if (result.kind === 'strength_band') {
+      const labels = { low: '低', medium: '中', high: '高' };
+      peekEl.textContent = `观辞 · ${result.targetIdx}号位当前胜率区间：${labels[result.band]}`;
+    } else if (result.kind === 'copy_passive') {
+      peekEl.textContent = `造化 · 已复制【${result.skillName}】`;
+    }
   };
-  listeners.onSpy = (idx, targetIdx, cardIdx, card) => {
-    const t = seats[targetIdx].revealToks[cardIdx - 1];
-    t.setCard(card);
-    t.el.style.display = '';
-    t.el.style.borderColor = 'var(--purple)';
-    t.el.style.boxShadow = '0 0 10px rgba(197,139,255,.6)';
-    addLog(`👁 魅惑窥视：${targetIdx}号位 ${players[targetIdx].hero.name} 的一枚暗令是 ${cardText(card)}`, 'skill');
+  listeners.onSkillPublicResult = (idx, result) => {
+    if (!result || result.kind !== 'reveal_self') return;
+    if (idx !== myIdx) {
+      const token = seats[idx].revealToks[result.cardIdx - 1];
+      token.setCard(result.card);
+      token.el.style.display = '';
+    }
+    addLog(`${players[idx].hero.name}公开了一枚暗令：${cardText(result.card)}`, 'skill');
   };
-  listeners.onPotAwarded = (winners, amount, uncontested, bonus) => {
+  listeners.onPotAwarded = (winners, amount, uncontested, bonus, netWinnings = {}) => {
     const [fx0, fy0] = FX.centerOf(potEl);
     for (const wIdx of winners) {
       const [tx, ty] = FX.centerOf(seats[wIdx].seat);
+      const net = netWinnings[wIdx] ?? amount + (bonus || 0) - players[wIdx].betRound;
       FX.potFly(fx0, fy0, tx, ty, () => {
-        FX.floatText(tx, ty - 30, `+${amount + (bonus || 0)}`, 'var(--green)', 24);
+        FX.floatText(tx, ty - 30, net >= 0 ? `+${net}` : `${net}`,
+          net >= 0 ? 'var(--green)' : 'var(--red)', 24);
       });
     }
     if (amount >= Config.SHAKE_POT) FX.shake();
-    potEl.textContent = '血池 0';
+    clearPot();
+  };
+  listeners.onAllInReveal = (entrants) => {
+    playSFX('judge');
+    FX.banner('决死亮牌', '下注行动结束 · 公开所有在局暗令', 'var(--red)');
+    for (const p of entrants) {
+      if (p.idx === myIdx) {
+        pToks.forEach((token, i) => {
+          token.setCard(p.hole[i]);
+          token.revealAnim();
+        });
+      } else {
+        seats[p.idx].revealToks.forEach((token, i) => {
+          token.setCard(p.hole[i]);
+          token.el.style.display = '';
+          token.revealAnim();
+        });
+      }
+      setStatus(p.idx, '决死亮牌', 'var(--red)');
+    }
   };
   listeners.onShowdown = (data) => {
     const [fx0, fy0] = FX.centerOf(potEl);
@@ -621,20 +848,31 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       }
       s.handEl.textContent = `✦ ${p.showdownInfo.name} ✦`;
       const won = data.wonAmount[p.idx];
+      const net = data.netResult?.[p.idx] ?? (won || 0) - p.betRound;
       const [cx, cy] = FX.centerOf(s.seat);
       if (won && won > 0) {
-        FX.potFly(fx0, fy0, cx, cy, () => FX.floatText(cx, cy - 34, `+${won}`, 'var(--green)', 26));
+        FX.potFly(fx0, fy0, cx, cy, () => FX.floatText(
+          cx, cy - 34, net >= 0 ? `+${net}` : `${net}`,
+          net >= 0 ? 'var(--green)' : 'var(--red)', 26,
+        ));
       } else {
         FX.slashFlash(s.seat);
-        FX.floatText(cx, cy - 34, `-${p.betRound}`, 'var(--red)', 22);
+        FX.floatText(cx, cy - 34, `${net}`, 'var(--red)', 22);
       }
       if (!best || p.showdownInfo.score > best.showdownInfo.score) best = p;
     }
     if (best && best.showdownInfo.cat >= 5) {
       FX.banner(best.showdownInfo.name, `${best.hero.name} · ${Config.HAND_NAMES[best.showdownInfo.cat].poker}`);
     }
+    if (data.pots?.length > 1) {
+      peekEl.textContent = data.pots.map((pot) => {
+        const winnersText = pot.winnerIds.map((idx) =>
+          `${players[idx].hero.name}净赢${pot.netWinnings?.[idx] ?? 0}`).join('、');
+        return `${pot.label} ${pot.amount}（${winnersText}）`;
+      }).join(' · ');
+    }
     if (data.totalPot >= Config.SHAKE_POT) FX.shake();
-    potEl.textContent = '血池 0';
+    clearPot();
   };
   listeners.onDeath = (idx) => {
     playSFX(players[idx].hero.gender === 'female' ? 'dieFemale' : 'die');

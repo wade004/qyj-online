@@ -112,6 +112,12 @@ export function startServer(port = 8790, { speed = 1 } = {}) {
 
   const cardJ = (c) => ({ r: c.rank, s: c.suit });
 
+  function skillResultJ(result) {
+    const out = { ...result };
+    if (out.card) out.card = cardJ(out.card);
+    return out;
+  }
+
   function snapshot(game) {
     const e = game.engine;
     const players = [];
@@ -121,12 +127,16 @@ export function startServer(port = 8790, { speed = 1 } = {}) {
         seat: i, hp: p.hp, energy: p.energy,
         alive: p.alive, folded: p.folded, allIn: p.allIn,
         betStreet: p.betStreet, betRound: p.betRound, skillUsed: p.skillUsed,
+        skillModifiers: p.skillStatuses
+          .filter((status) => status.modifier)
+          .map((status) => ({ modifier: status.modifier, amount: status.amount || 0 })),
       });
     }
     const board = [];
     for (let i = 0; i < e.revealed; i++) board.push(cardJ(e.board[i]));
     return {
-      round: e.round, pot: e.totalPot(), waitingIdx: e.waitingIdx,
+      round: e.round, street: e.street, pot: e.totalPot(), potDisplay: e.getPotDisplay(true),
+      waitingIdx: e.waitingIdx,
       revealed: e.revealed, board, players,
     };
   }
@@ -181,14 +191,24 @@ export function startServer(port = 8790, { speed = 1 } = {}) {
       const hole = e.players[idx].hole;
       sendToSeat(game, idx, { ev: 'hole', a: { hole: [cardJ(hole[0]), cardJ(hole[1])] } });
     };
-    L.onSkill = (idx, skillName) => fwd('onSkill', { idx, skillName });
+    L.onSkill = (idx, skillId, skillName, presentation) =>
+      fwd('onSkill', { idx, skillId, skillName, presentation });
+    L.onPassive = (idx, skillId, skillName, presentation) =>
+      fwd('onPassive', { idx, skillId, skillName, presentation });
+    L.onSkillEffect = (idx, skillId, skillName, presentation) =>
+      fwd('onSkillEffect', { idx, skillId, skillName, presentation });
     L.onQuote = (idx, text) => fwd('onQuote', { idx, text });
-    L.onPeek = (idx, card, slot) =>
-      sendToSeat(game, idx, { ev: 'onPeek', a: { idx, card: cardJ(card), slot } });
-    L.onSpy = (idx, targetIdx, cardIdx, card) =>
-      sendToSeat(game, idx, { ev: 'onSpy', a: { idx, targetIdx, cardIdx, card: cardJ(card) } });
-    L.onPotAwarded = (winners, amount, uncontested, bonus) =>
-      fwd('onPotAwarded', { winners, amount, uncontested, bonus });
+    L.onSkillResult = (idx, result) =>
+      sendToSeat(game, idx, { ev: 'onSkillResult', a: { idx, result: skillResultJ(result) } });
+    L.onSkillPublicResult = (idx, result) =>
+      fwd('onSkillPublicResult', { idx, result: skillResultJ(result) });
+    L.onPotAwarded = (winners, amount, uncontested, bonus, netWinnings) =>
+      fwd('onPotAwarded', { winners, amount, uncontested, bonus, netWinnings });
+    L.onAllInReveal = (entrants) => fwd('onAllInReveal', {
+      entrants: entrants.map((p) => ({
+        seat: p.idx, hole: [cardJ(p.hole[0]), cardJ(p.hole[1])],
+      })),
+    });
     L.onShowdown = (data) => {
       const entrants = data.entrants.map((p) => ({
         seat: p.idx,
@@ -200,7 +220,10 @@ export function startServer(port = 8790, { speed = 1 } = {}) {
       }));
       broadcastTeam(team, {
         ev: 'onShowdown',
-        a: { entrants, won: data.wonAmount, totalPot: data.totalPot },
+        a: {
+          entrants, won: data.wonAmount, net: data.netResult,
+          totalPot: data.totalPot, pots: data.pots || [],
+        },
         s: snapshot(game),
       });
     };
@@ -386,6 +409,8 @@ export function startServer(port = 8790, { speed = 1 } = {}) {
         if (!act.tier) return;
       } else if (act.type === 'check') {
         if (!opts.canCheck) return;
+      } else if (act.type === 'allin') {
+        if (opts.canAllIn === false) return;
       } else if (!['fold', 'call', 'allin'].includes(act.type)) {
         return;
       }
@@ -395,8 +420,13 @@ export function startServer(port = 8790, { speed = 1 } = {}) {
     } else if (cmd === 'skill') {
       const team = client.teamId ? teams.get(client.teamId) : null;
       if (!team || !team.game || !client.seat) return;
-      const extra = (msg.cardIdx === 1 || msg.cardIdx === 2) ? { cardIdx: msg.cardIdx } : null;
-      team.game.engine.useSkill(client.seat, extra);
+      const raw = msg.selection && typeof msg.selection === 'object' ? msg.selection : {};
+      const selection = {};
+      if (typeof raw.choice === 'string' || Number.isInteger(raw.choice)) selection.choice = raw.choice;
+      if (Number.isInteger(raw.targetIdx) && raw.targetIdx >= 1 && raw.targetIdx <= Config.PLAYER_COUNT) {
+        selection.targetIdx = raw.targetIdx;
+      }
+      team.game.engine.useSkill(client.seat, selection);
 
     } else if (cmd === 'extend') {
       const team = client.teamId ? teams.get(client.teamId) : null;

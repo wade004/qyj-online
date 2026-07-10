@@ -1,5 +1,5 @@
 // ============================================================================
-// heroselect.js - 英雄选择界面：六宫格英雄卡
+// heroselect.js - 英雄选择界面：可滚动英雄卡阵列
 // ============================================================================
 
 import { HEROES } from '../game/heroes.js';
@@ -15,8 +15,10 @@ export function showHeroSelect(onPick) {
     <div class="hero-grid"></div>`;
   const grid = screen.querySelector('.hero-grid');
   for (const hero of HEROES) {
-    const card = document.createElement('div');
+    const card = document.createElement('button');
+    card.type = 'button';
     card.className = 'hero-card';
+    card.dataset.heroId = hero.id;
     card.innerHTML = `
       <div class="hc-portrait" style="background-image:url('${hero.portrait}')">
         <div class="hc-namebar">

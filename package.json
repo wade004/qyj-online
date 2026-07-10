@@ -8,6 +8,6 @@
     "web": "npx --yes serve -l 8080 .",
     "server": "node server/server.mjs 8790",
     "postinstall": "cd server && npm install",
-    "test": "node test/smoke.mjs && node test/mp_smoke.mjs"
+    "test": "node test/audio.mjs && node test/poker_rules.mjs && node test/action_hint.mjs && node test/advisor.mjs && node test/skills.mjs && node test/smoke.mjs && node test/mp_smoke.mjs"
   }
 }

@@ -3,6 +3,7 @@
 // ============================================================================
 
 const AUDIO_BASE = 'assets/audio';
+const MUTE_STORAGE_KEY = 'qyj.masterMuted';
 
 // BGM 音轨池
 const BGM_TRACKS = [
@@ -30,9 +31,16 @@ const SFX = {
 };
 
 let bgmAudio = null;
-let bgmEnabled = true;
-let sfxEnabled = true;
+let masterMuted = false;
+try {
+  masterMuted = localStorage.getItem(MUTE_STORAGE_KEY) === '1';
+} catch {
+  masterMuted = false;
+}
+let bgmEnabled = !masterMuted;
+let sfxEnabled = !masterMuted;
 let currentTrack = 0;
+const activeSfx = new Set();
 
 // 预加载音效（减少首次延迟）
 const sfxCache = {};
@@ -78,12 +86,58 @@ export function playSFX(name) {
   if (cached) {
     const clone = cached.cloneNode();
     clone.volume = 0.6;
-    clone.play().catch(() => {});
+    activeSfx.add(clone);
+    clone.addEventListener('ended', () => activeSfx.delete(clone), { once: true });
+    clone.play().catch(() => activeSfx.delete(clone));
   } else {
     const audio = new Audio(SFX[name]);
     audio.volume = 0.6;
-    audio.play().catch(() => {});
+    activeSfx.add(audio);
+    audio.addEventListener('ended', () => activeSfx.delete(audio), { once: true });
+    audio.play().catch(() => activeSfx.delete(audio));
   }
+}
+
+function stopActiveSFX() {
+  for (const audio of activeSfx) {
+    audio.pause();
+    try { audio.currentTime = 0; } catch {}
+  }
+  activeSfx.clear();
+}
+
+export function setMuted(muted) {
+  masterMuted = !!muted;
+  bgmEnabled = !masterMuted;
+  sfxEnabled = !masterMuted;
+  try { localStorage.setItem(MUTE_STORAGE_KEY, masterMuted ? '1' : '0'); } catch {}
+  if (masterMuted) {
+    stopBGM();
+    stopActiveSFX();
+  } else if (initialized) {
+    playBGM(currentTrack);
+  }
+  return masterMuted;
+}
+
+export function toggleMuted() { return setMuted(!masterMuted); }
+export function isMuted() { return masterMuted; }
+
+export function bindAudioToggle(button) {
+  if (!button) return;
+  const render = () => {
+    const muted = isMuted();
+    button.textContent = muted ? '🔇' : '🔊';
+    button.title = muted ? '开启声音' : '关闭声音';
+    button.setAttribute('aria-label', button.title);
+    button.setAttribute('aria-pressed', String(muted));
+    button.classList.toggle('muted', muted);
+  };
+  button.addEventListener('click', () => {
+    toggleMuted();
+    render();
+  });
+  render();
 }
 
 // 控制开关

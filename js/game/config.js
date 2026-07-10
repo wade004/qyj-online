@@ -59,22 +59,23 @@ export const HAND_NAMES = {
 
 export const BOARD_SLOT_NAMES = [null, '天时', '天时', '天时', '地利', '人和'];
 
-// AI 性格参数（策划案 第八章）
+// AI 性格只对均衡基线做小幅扰动，避免退化成固定阈值脚本。
 export const AI_STYLES = [
-  { key: 'aggressive', name: '激进', raiseThreshold: 0.52, callAdj: -0.05, bluffRate: 0.22 },
-  { key: 'tight', name: '紧手', raiseThreshold: 0.68, callAdj: 0.04, bluffRate: 0.05 },
-  { key: 'bluffer', name: '诈唬', raiseThreshold: 0.60, callAdj: 0.00, bluffRate: 0.32 },
-  { key: 'tag', name: '紧凶', raiseThreshold: 0.62, callAdj: 0.06, bluffRate: 0.10 },
-  { key: 'loose', name: '松浪', raiseThreshold: 0.46, callAdj: -0.08, bluffRate: 0.18 },
+  { key: 'aggressive', name: '激进', looseness: 0.02, aggression: 0.10, bluffFactor: 1.12 },
+  { key: 'tight', name: '紧手', looseness: -0.05, aggression: -0.01, bluffFactor: 0.72 },
+  { key: 'bluffer', name: '诈唬', looseness: 0.01, aggression: 0.05, bluffFactor: 1.28 },
+  { key: 'tag', name: '紧凶', looseness: -0.02, aggression: 0.06, bluffFactor: 0.88 },
+  { key: 'loose', name: '松浪', looseness: 0.06, aggression: -0.01, bluffFactor: 1.05 },
 ];
 
-export const AI_SIMS = 80;
+export const AI_SIMS = 180;
 export const PLAYER_SIMS = 150;
-export const AI_SKILL_RATE = 0.4;
+export const ADVICE_SIMS = 360;
+export const AI_SKILL_RATE = 0.62;
 
-export const LBW_PASSIVE_BONUS = 0.10;
-export const LBW_ACTIVE_BONUS = 0.30;
-export const LP_REFUND_RATIO = 0.50;
+// 技能只允许小额保险，不得显著改变德州结算。
+export const SKILL_REBATE_RATIO = 0.10;
+export const SKILL_REBATE_CAP = 50;
 
 /** 数额取整到5 */
 export function roundAmount(n) {

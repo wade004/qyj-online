@@ -7,8 +7,15 @@
 
 import * as Config from './config.js';
 import { newShuffledDeck, draw, shuffle } from './deck.js';
-import { evalBest } from './handeval.js';
-import { getHero, HEROES, checkCondition, dealPassiveEnergy } from './heroes.js';
+import { describe, evalBest } from './handeval.js';
+import { getHero, HEROES } from './heroes.js';
+import {
+  dispatchSkillEvent,
+  executeActiveSkill,
+  getSkillAvailability,
+  getSkillInput,
+  resetRoundSkillState,
+} from './skills.js';
 import * as AI from './ai.js';
 
 export function cardText(card) {
@@ -21,8 +28,9 @@ export class Engine {
    * @param {object} listeners 回调表
    * @param {Set<number>|null} humanSeats 真人座位集合（1-based）；缺省 {1}
    * @param {object} names 各座位显示名 { [idx]: name }
+   * @param {object} rules 模式专属终局规则
    */
-  constructor(heroIds, listeners, humanSeats = null, names = {}) {
+  constructor(heroIds, listeners, humanSeats = null, names = {}, rules = {}) {
     this.listeners = listeners || {};
     humanSeats = humanSeats || new Set([1]);
     this.players = [null]; // 1-based
@@ -43,13 +51,18 @@ export class Engine {
         betStreet: 0,
         betRound: 0,
         acted: false,
+        lastActionBet: 0,
         skillUsed: false,
-        qihuo: false,
-        jianbi: false,
+        skillStatuses: [],
+        passiveUsed: Object.create(null),
+        skillData: {
+          flags: Object.create(null), copiedPassiveIds: [],
+          revealedCard: null, raisedThisRound: false,
+        },
+        lastHandCategory: 1,
+        roundStartHp: Config.INIT_HP,
         deathRound: null,
         deathOrder: null,
-        peekCard: null,
-        spied: null,
         showdownInfo: null,
       });
     }
@@ -71,12 +84,15 @@ export class Engine {
     this.revealed = 0;
     this.currentBet = 0;
     this.minRaiseInc = 0;
+    this.streetRaiseCount = 0;
     this.actingIdx = 0;
     this.waitingIdx = null;
-    this.raiseBan = false;
-    this.raiseBanSource = 0;
+    this.streetHadRaise = false;
+    this.allInHandsRevealed = false;
+    this.lastAggressiveWager = null;
     this.deathCounter = 0;
     this.gameOver = false;
+    this.endWhenHumanEliminated = !!rules.endWhenHumanEliminated;
 
     this.time = 0;
     this.queue = [];
@@ -116,6 +132,75 @@ export class Engine {
     let pot = 0;
     for (let i = 1; i <= Config.PLAYER_COUNT; i++) pot += this.players[i].betRound;
     return pot;
+  }
+
+  getPotDisplay(includeReference = true) {
+    const last = this.lastAggressiveWager;
+    const breakdown = this.getPotBreakdown().map((pot) => ({ ...pot }));
+    const pendingAmount = breakdown
+      .filter((pot) => pot.kind === 'pending')
+      .reduce((sum, pot) => sum + pot.amount, 0);
+    const current = breakdown.filter((pot) => pot.kind !== 'pending');
+    if (!current.length) current.push({ label: '当前血池', amount: 0, kind: 'main' });
+    if (pendingAmount > 0) current[current.length - 1].amount += pendingAmount;
+    if (current.length === 1) current[0].label = '当前血池';
+
+    if (includeReference && last) {
+      current.push({
+        label: '上次下注前', amount: last?.potBefore || 0, kind: 'reference',
+        actorIdx: last?.actorIdx || null,
+        wagerAmount: last?.amount || 0,
+        ratio: last?.ratio || 0,
+      });
+    }
+    return current;
+  }
+
+  getPotBreakdown() {
+    const total = this.totalPot();
+    const entrants = this.activePlayers();
+    if (!entrants.some((player) => player.allIn)) {
+      return [{ label: '主池', amount: total, kind: 'main' }];
+    }
+
+    const contribs = {};
+    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+      contribs[i] = this.players[i].betRound;
+    }
+    const rankedContributions = Object.entries(contribs)
+      .filter(([, amount]) => amount > 0)
+      .sort((a, b) => b[1] - a[1]);
+    let pending = null;
+    if (rankedContributions.length) {
+      const [topIdx, topAmount] = rankedContributions[0];
+      const matchedCeiling = rankedContributions[1]?.[1] || 0;
+      if (topAmount > matchedCeiling) {
+        pending = { label: '待跟注', amount: topAmount - matchedCeiling, kind: 'pending' };
+        contribs[topIdx] = matchedCeiling;
+      }
+    }
+
+    const matchedCeiling = Math.max(0, ...Object.values(contribs));
+    const levels = [...new Set([
+      ...entrants.filter((player) => player.allIn).map((player) => contribs[player.idx]),
+      matchedCeiling,
+    ].filter((amount) => amount > 0))].sort((a, b) => a - b);
+
+    let contestedIndex = 0;
+    const visible = this.buildPots(entrants, { contribs, levels }).map((pot) => {
+      if (pot.uncalledTo) {
+        return { label: '待跟注', amount: pot.amount, kind: 'pending' };
+      }
+      const label = contestedIndex === 0 ? '主池' : `边池 ${contestedIndex}`;
+      const kind = contestedIndex === 0 ? 'main' : 'side';
+      contestedIndex++;
+      return { label, amount: pot.amount, kind };
+    });
+    if (!visible.some((pot) => pot.kind === 'main')) {
+      visible.unshift({ label: '主池', amount: 0, kind: 'main' });
+    }
+    if (pending) visible.push(pending);
+    return visible;
   }
 
   revealedBoard() {
@@ -168,22 +253,21 @@ export class Engine {
     for (let i = 0; i < 5; i++) this.board.push(draw(this.deck));
     this.revealed = 0;
     this.street = 'preflop';
-    this.raiseBan = false;
-    this.raiseBanSource = 0;
+    this.streetHadRaise = false;
+    this.allInHandsRevealed = false;
+    this.lastAggressiveWager = null;
 
     for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
       const p = this.players[i];
+      p.roundStartHp = p.hp;
       p.hole = [];
       p.folded = !p.alive;
       p.allIn = false;
       p.betStreet = 0;
       p.betRound = 0;
       p.acted = false;
-      p.skillUsed = false;
-      p.qihuo = false;
-      p.jianbi = false;
-      p.peekCard = null;
-      p.spied = null;
+      p.lastActionBet = 0;
+      resetRoundSkillState(p);
       p.showdownInfo = null;
     }
 
@@ -198,24 +282,22 @@ export class Engine {
       const p = this.players[i];
       if (p.alive) {
         p.hole = [draw(this.deck), draw(this.deck)];
-        const gain = dealPassiveEnergy(p.hero.id, p.hole);
-        if (gain > 0) {
-          p.energy += gain;
-          this.emit('onEnergyChange', i);
-          this.log(`${p.hero.name} 被动触发 +${gain}⚡`, 'skill');
-        }
+        p.lastHandCategory = describe(p.hole).cat;
       }
     }
+    dispatchSkillEvent(this, 'DEAL');
     this.emit('onDeal');
 
     // 血祭
-    const sbIdx = this.nextIdx(this.dealerIdx);
+    const headsUp = this.aliveCount() === 2;
+    const sbIdx = headsUp ? this.dealerIdx : this.nextIdx(this.dealerIdx);
     const bbIdx = sbIdx ? this.nextIdx(sbIdx) : null;
     if (!sbIdx || !bbIdx) return;
     this.commit(this.players[sbIdx], Math.min(blinds.sb, this.players[sbIdx].hp));
     this.commit(this.players[bbIdx], Math.min(blinds.bb, this.players[bbIdx].hp));
     this.currentBet = blinds.bb;
     this.minRaiseInc = blinds.bb;
+    this.streetRaiseCount = 0;
     this.emit('onBlindsPosted', sbIdx, blinds.sb, bbIdx, blinds.bb);
     this.log(`${this.players[sbIdx].hero.name} 献祭 ${blinds.sb}，${this.players[bbIdx].hero.name} 献祭 ${blinds.bb}`, 'info');
 
@@ -269,19 +351,19 @@ export class Engine {
       canCheck: toCall === 0,
       callAmt,
       allinAmt: p.hp,
+      canRaise: !p.acted || this.currentBet - p.lastActionBet >= this.minRaiseInc,
+      canAllIn: false,
       tiers: [],
     };
-    const banned = this.raiseBan && p.idx !== this.raiseBanSource;
-    if (!banned) {
-      const seen = new Set();
-      for (const tier of Config.ATTACK_TIERS) {
-        let inc = Config.roundAmount(pot * tier.ratio);
-        if (inc < this.minRaiseInc) inc = Config.roundAmount(this.minRaiseInc);
-        const cost = toCall + inc;
-        if (cost < p.hp && !seen.has(cost)) {
-          seen.add(cost);
-          opts.tiers.push({ key: tier.key, name: tier.name, inc, cost });
-        }
+    opts.canAllIn = p.hp <= toCall || opts.canRaise;
+    const seen = new Set();
+    for (const tier of opts.canRaise ? Config.ATTACK_TIERS : []) {
+      let inc = Config.roundAmount(pot * tier.ratio);
+      if (inc < this.minRaiseInc) inc = Config.roundAmount(this.minRaiseInc);
+      const cost = toCall + inc;
+      if (cost < p.hp && !seen.has(cost)) {
+        seen.add(cost);
+        opts.tiers.push({ key: tier.key, name: tier.name, inc, cost });
       }
     }
     return opts;
@@ -316,61 +398,120 @@ export class Engine {
   applyAction(p, act) {
     if (this.gameOver) return;
     const name = p.hero.name;
+    const potBeforeAction = this.totalPot();
+    let actionGroup = 'defend';
     if (act.type === 'fold') {
+      actionGroup = 'fold';
       p.folded = true;
       p.acted = true;
+      p.lastActionBet = this.currentBet;
       this.emit('onAction', p.idx, 'fold', 0);
       this.log(`${name} 退避`, 'fold');
     } else if (act.type === 'check') {
       p.acted = true;
+      p.lastActionBet = this.currentBet;
       this.emit('onAction', p.idx, 'check', 0);
       this.log(`${name} 静观`, 'info');
     } else if (act.type === 'call') {
       const pay = this.commit(p, Math.max(0, this.currentBet - p.betStreet));
       p.acted = true;
+      p.lastActionBet = this.currentBet;
       this.emit('onAction', p.idx, 'call', pay);
       this.log(`${name} 应战 ${pay}`, 'info');
     } else if (act.type === 'raise') {
+      actionGroup = 'attack';
+      this.streetHadRaise = true;
+      p.skillData.raisedThisRound = true;
       const tier = act.tier;
       const toCall = Math.max(0, this.currentBet - p.betStreet);
       const pay = this.commit(p, toCall + tier.inc);
       this.currentBet = p.betStreet;
       this.minRaiseInc = tier.inc;
+      this.streetRaiseCount++;
       p.acted = true;
+      p.lastActionBet = this.currentBet;
       for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
         if (i !== p.idx) this.players[i].acted = false;
       }
+      this.lastAggressiveWager = {
+        actorIdx: p.idx,
+        amount: pay,
+        potBefore: potBeforeAction,
+        ratio: potBeforeAction > 0 ? pay / potBeforeAction : 0,
+      };
       this.emit('onAction', p.idx, tier.key, pay);
       this.log(`${name} ${tier.name}！灌注 ${pay}`, 'raise');
     } else if (act.type === 'allin') {
+      const raisesCurrentBet = p.betStreet + p.hp > this.currentBet;
+      actionGroup = raisesCurrentBet ? 'attack' : 'defend';
+      if (raisesCurrentBet) {
+        this.streetHadRaise = true;
+        p.skillData.raisedThisRound = true;
+      }
       const pay = this.commit(p, p.hp);
       if (p.betStreet > this.currentBet) {
         const raiseAmt = p.betStreet - this.currentBet;
-        if (raiseAmt >= this.minRaiseInc) this.minRaiseInc = raiseAmt;
+        const fullRaise = raiseAmt >= this.minRaiseInc;
+        if (fullRaise) this.minRaiseInc = raiseAmt;
         this.currentBet = p.betStreet;
-        for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
-          if (i !== p.idx) this.players[i].acted = false;
+        this.streetRaiseCount++;
+        if (fullRaise) {
+          for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+            if (i !== p.idx) this.players[i].acted = false;
+          }
         }
       }
       p.acted = true;
+      p.lastActionBet = this.currentBet;
+      if (raisesCurrentBet) {
+        this.lastAggressiveWager = {
+          actorIdx: p.idx,
+          amount: pay,
+          potBefore: potBeforeAction,
+          ratio: potBeforeAction > 0 ? pay / potBeforeAction : 0,
+        };
+      }
       this.emit('onAction', p.idx, 'allin', pay);
       this.emit('onQuote', p.idx, p.hero.lines.allin);
       this.log(`${name} 决死！押上全部 ${pay} 气血！`, 'allin');
     }
+    dispatchSkillEvent(this, 'ACTION', {
+      actor: p, type: act.type, group: actionGroup, activeCount: this.activePlayers().length,
+    });
     this.delay(0.55, () => this.proceedAction());
   }
 
   // ---------------- 揭示天机 / 推进灌注轮 ----------------
 
+  revealAllInHandsIfClosed() {
+    if (this.allInHandsRevealed) return false;
+    const entrants = this.activePlayers();
+    if (entrants.length < 2 || !entrants.some((p) => p.allIn)) return false;
+    const playersWithChips = entrants.filter((p) => !p.allIn);
+    if (playersWithChips.length > 1) return false;
+    this.allInHandsRevealed = true;
+    this.emit('onAllInReveal', entrants);
+    this.log(`决死行动封闭，${entrants.map((p) => p.hero.name).join('、')}公开暗令`, 'show');
+    return true;
+  }
+
   advanceStreet() {
+    this.revealAllInHandsIfClosed();
+    if (this.street !== 'river') {
+      dispatchSkillEvent(this, 'STREET_ADVANCE', {
+        from: this.street, hadRaise: this.streetHadRaise,
+      });
+    }
     for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
       this.players[i].betStreet = 0;
       this.players[i].acted = false;
+      this.players[i].lastActionBet = 0;
     }
     this.currentBet = 0;
     this.minRaiseInc = Config.getBlinds(this.round).bb;
-    this.raiseBan = false;
-    this.raiseBanSource = 0;
+    this.streetRaiseCount = 0;
+    this.streetHadRaise = false;
+    this.lastAggressiveWager = null;
 
     let nextStreet, revealTo;
     if (this.street === 'preflop') { nextStreet = 'flop'; revealTo = 3; }
@@ -378,11 +519,23 @@ export class Engine {
     else if (this.street === 'turn') { nextStreet = 'river'; revealTo = 5; }
     else { this.showdown(); return; }
 
+    const oldRevealed = this.revealed;
     this.street = nextStreet;
     this.revealed = revealTo;
     this.emit('onStreet', nextStreet, revealTo);
     const slotName = nextStreet === 'flop' ? '天时' : Config.BOARD_SLOT_NAMES[revealTo];
     this.log(`揭示【${slotName}】${this.boardTextNew(nextStreet)}`, 'sys');
+
+    const changedIds = new Set();
+    for (const p of this.activePlayers()) {
+      const category = describe([p.hole[0], p.hole[1], ...this.revealedBoard()]).cat;
+      if (category !== p.lastHandCategory) changedIds.add(p.idx);
+      p.lastHandCategory = category;
+    }
+    const cards = this.board.slice(oldRevealed, revealTo);
+    dispatchSkillEvent(this, 'BOARD_REVEALED', {
+      street: nextStreet, cards, firstCard: cards[0], changedIds,
+    });
 
     let canAct = 0;
     for (const p of this.activePlayers()) if (!p.allIn) canAct++;
@@ -408,20 +561,13 @@ export class Engine {
 
   awardUncontested(p) {
     const pot = this.totalPot();
-    let bonus = 0;
-    if (p.hero.id === 'lvbuwei') {
-      const ratio = Config.LBW_PASSIVE_BONUS + (p.qihuo ? Config.LBW_ACTIVE_BONUS : 0);
-      bonus = Config.roundAmount(pot * ratio);
-    }
-    if (p.hero.id === 'xiangyu') {
-      p.energy++;
-      this.emit('onEnergyChange', p.idx);
-      this.log('项羽 被动【不亮招夺池】+1⚡', 'skill');
-    }
-    p.hp += pot + bonus;
+    const netWinnings = { [p.idx]: pot - p.betRound };
+    p.hp += pot;
     this.emit('onHpChange', p.idx);
-    this.emit('onPotAwarded', [p.idx], pot, true, bonus);
-    this.log(`${p.hero.name} 兵不血刃，夺池 ${pot}${bonus > 0 ? `（+${bonus} 经营加成）` : ''}`, 'win');
+    dispatchSkillEvent(this, 'UNCONTESTED_WIN', { winner: p });
+    dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'uncontested', winner: p });
+    this.emit('onPotAwarded', [p.idx], pot, true, 0, netWinnings);
+    this.log(`${p.hero.name} 兵不血刃，净赢 ${netWinnings[p.idx]}`, 'win');
     this.delay(2.2, () => this.endRound());
   }
 
@@ -442,91 +588,145 @@ export class Engine {
       this.emit('onEnergyChange', p.idx);
     }
 
-    const pots = this.buildPots(entrants);
+    const potLayers = this.buildPots(entrants);
+    const pots = [];
+    for (const layer of potLayers) {
+      if (!layer.uncalledTo) {
+        pots.push(layer);
+        continue;
+      }
+      const owner = this.players[layer.uncalledTo];
+      owner.hp += layer.amount;
+      owner.betRound = Math.max(0, owner.betRound - layer.amount);
+      owner.betStreet = Math.max(0, owner.betStreet - layer.amount);
+      this.emit('onHpChange', owner.idx);
+      this.log(`${owner.hero.name} 未被跟注的 ${layer.amount} 气血退回`, 'info');
+    }
 
     const winnersAll = new Set();
     const wonAmount = {};
-    for (const pot of pots) {
+    const potResults = [];
+    for (let potIdx = 0; potIdx < pots.length; potIdx++) {
+      const pot = pots[potIdx];
       let best = -1;
       for (const p of pot.eligible) if (p.showdownInfo.score > best) best = p.showdownInfo.score;
       const winners = pot.eligible.filter((p) => p.showdownInfo.score === best);
       const share = Math.floor(pot.amount / winners.length);
       const remainder = pot.amount - share * winners.length;
-      winners.forEach((p, wi) => {
-        wonAmount[p.idx] = (wonAmount[p.idx] || 0) + share + (wi === 0 ? remainder : 0);
+      const awards = {};
+      const oddChipOrder = [...winners].sort((a, b) => {
+        const distanceA = (a.idx - this.dealerIdx + Config.PLAYER_COUNT) % Config.PLAYER_COUNT
+          || Config.PLAYER_COUNT;
+        const distanceB = (b.idx - this.dealerIdx + Config.PLAYER_COUNT) % Config.PLAYER_COUNT
+          || Config.PLAYER_COUNT;
+        return distanceA - distanceB;
+      });
+      oddChipOrder.forEach((p, wi) => {
+        const award = share + (wi < remainder ? 1 : 0);
+        awards[p.idx] = award;
+        wonAmount[p.idx] = (wonAmount[p.idx] || 0) + award;
         winnersAll.add(p.idx);
+      });
+      const label = potIdx === 0 ? '主池' : `边池 ${potIdx}`;
+      const netWinnings = {};
+      for (const winner of winners) {
+        netWinnings[winner.idx] = awards[winner.idx] - (pot.contributionById[winner.idx] || 0);
+      }
+      const winnerNames = winners.map((p) =>
+        `${p.hero.name}（净赢 ${netWinnings[p.idx]}）`).join('、');
+      this.log(`${label} ${pot.amount} → ${winnerNames}`, 'win');
+      potResults.push({
+        label, amount: pot.amount,
+        eligibleIds: pot.eligible.map((p) => p.idx),
+        winnerIds: winners.map((p) => p.idx),
+        awards, netWinnings,
       });
     }
 
-    // 系统注入加成（吕不韦）与入账
+    // 血池严格按德州扑克主池/边池结果入账，技能不得修改分配。
     for (const p of entrants) {
       const amt = wonAmount[p.idx];
       if (amt && amt > 0) {
-        let bonus = 0;
-        if (p.hero.id === 'lvbuwei') {
-          const ratio = Config.LBW_PASSIVE_BONUS + (p.qihuo ? Config.LBW_ACTIVE_BONUS : 0);
-          bonus = Config.roundAmount(amt * ratio);
-          if (bonus > 0) this.log(`吕不韦 经营有道，额外+${bonus} 气血`, 'skill');
-        }
-        p.hp += amt + bonus;
-        wonAmount[p.idx] = amt + bonus;
+        p.hp += amt;
         this.emit('onHpChange', p.idx);
       }
     }
 
-    // 败者被动与坚壁返还
-    for (const p of entrants) {
-      if (!winnersAll.has(p.idx)) {
-        if (p.hero.id === 'lianpo') {
-          p.energy++;
-          this.emit('onEnergyChange', p.idx);
-          this.log('廉颇 被动【亮招落败】+1⚡', 'skill');
-        }
-        if (p.jianbi) {
-          const refund = Config.roundAmount(p.betRound * Config.LP_REFUND_RATIO);
-          if (refund > 0) {
-            p.hp += refund;
-            this.emit('onHpChange', p.idx);
-            this.log(`${p.hero.name}【坚壁】生效，返还 ${refund} 气血`, 'skill');
-          }
-        }
-      } else if (p.hero.id === 'diaochan') {
-        p.energy++;
-        this.emit('onEnergyChange', p.idx);
-        this.log('貂蝉 被动【亮招获胜】+1⚡', 'skill');
-      }
-    }
+    const entrantIds = new Set(entrants.map((p) => p.idx));
+    dispatchSkillEvent(this, 'SHOWDOWN_RESULT', {
+      entrants, entrantIds, winnerIds: winnersAll, wonAmount,
+    });
+    dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'showdown', winnerIds: winnersAll });
+
+    const netResult = {};
+    for (const p of entrants) netResult[p.idx] = (wonAmount[p.idx] || 0) - p.betRound;
 
     this.emit('onShowdown', {
       entrants,
       wonAmount,
-      totalPot: this.totalPot(),
+      netResult,
+      totalPot: pots.reduce((sum, pot) => sum + pot.amount, 0),
+      pots: potResults,
     });
-    for (const [idx, amt] of Object.entries(wonAmount)) {
-      this.log(`${this.players[Number(idx)].hero.name} 夺得血池 ${amt}`, 'win');
+    for (const [idx, net] of Object.entries(netResult)) {
+      if (net > 0) this.log(`${this.players[Number(idx)].hero.name} 本回合净赢 ${net}`, 'win');
     }
 
     this.delay(3.6, () => this.endRound());
   }
 
-  /** 构建主池与边池（按参战者投入分层，支持决死边池） */
-  buildPots(entrants) {
-    const contribs = {};
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
-      contribs[i] = this.players[i].betRound;
-    }
-    const levels = [...new Set(entrants.map((p) => p.betRound).filter((v) => v > 0))].sort((a, b) => a - b);
+  /** 按投入逐层剥离，并合并可争夺资格相同的相邻层。 */
+  buildPots(entrants, options = {}) {
+    const contribs = options.contribs || Object.fromEntries(
+      this.players.slice(1).map((player) => [player.idx, player.betRound]),
+    );
+    const levels = options.levels || [...new Set(
+      Object.values(contribs).filter((v) => v > 0),
+    )].sort((a, b) => a - b);
 
     const pots = [];
+    const appendLayer = (layer) => {
+      const previous = pots[pots.length - 1];
+      const sameUncalledOwner = layer.uncalledTo
+        && previous?.uncalledTo === layer.uncalledTo;
+      const eligibleKey = layer.eligible.map((player) => player.idx).sort((a, b) => a - b).join(',');
+      const previousEligibleKey = previous && !previous.uncalledTo
+        ? previous.eligible.map((player) => player.idx).sort((a, b) => a - b).join(',')
+        : null;
+      const sameContenders = !layer.uncalledTo && previous && !previous.uncalledTo
+        && eligibleKey === previousEligibleKey;
+      if (!sameUncalledOwner && !sameContenders) {
+        pots.push(layer);
+        return;
+      }
+
+      previous.amount += layer.amount;
+      previous.contributorIds = [...new Set([
+        ...previous.contributorIds, ...layer.contributorIds,
+      ])].sort((a, b) => a - b);
+      for (const [idx, amount] of Object.entries(layer.contributionById)) {
+        previous.contributionById[idx] = (previous.contributionById[idx] || 0) + amount;
+      }
+    };
+
     let prev = 0;
     for (const level of levels) {
-      let amt = 0;
-      for (const c of Object.values(contribs)) {
-        const seg = Math.min(c, level) - Math.min(c, prev);
-        if (seg > 0) amt += seg;
+      const contributionById = {};
+      for (const [idx, contribution] of Object.entries(contribs)) {
+        const amount = Math.max(0, Math.min(contribution, level) - prev);
+        if (amount > 0) contributionById[idx] = amount;
       }
+      const contributorIds = Object.keys(contributionById).map(Number);
+      const amt = Object.values(contributionById).reduce((sum, amount) => sum + amount, 0);
       const eligible = entrants.filter((p) => p.betRound >= level);
-      if (amt > 0 && eligible.length > 0) pots.push({ amount: amt, eligible });
+      if (amt > 0 && contributorIds.length === 1) {
+        appendLayer({
+          amount: amt, eligible: [], contributorIds, contributionById,
+          uncalledTo: contributorIds[0],
+        });
+      } else if (amt > 0 && eligible.length > 0) {
+        appendLayer({ amount: amt, eligible, contributorIds, contributionById, uncalledTo: null });
+      }
       prev = level;
     }
     return pots;
@@ -536,6 +736,7 @@ export class Engine {
 
   endRound() {
     if (this.gameOver) return;
+    dispatchSkillEvent(this, 'ROUND_END', { round: this.round });
     for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
       const p = this.players[i];
       if (p.alive && p.hp <= 0) {
@@ -549,7 +750,9 @@ export class Engine {
     }
     this.emit('onRoundEnd', this.round);
 
-    if (this.round >= Config.MAX_ROUNDS || this.aliveCount() < 2) {
+    const humanEliminated = this.endWhenHumanEliminated
+      && this.players.slice(1).some((p) => p.isHuman && !p.alive);
+    if (humanEliminated || this.round >= Config.MAX_ROUNDS || this.aliveCount() < 2) {
       this.delay(1.6, () => this.doGameOver());
     } else {
       this.delay(1.6, () => this.startRound());
@@ -587,54 +790,18 @@ export class Engine {
 
   canUseSkill(idx) {
     const p = this.players[idx];
-    if (this.gameOver || !p.alive || p.folded || p.skillUsed) return false;
-    if (this.street === 'idle') return false;
-    if (p.energy < p.hero.skillCost) return false;
-    return checkCondition(p.hero.id, p.hole);
+    return getSkillAvailability(this, p).ok;
   }
 
-  useSkill(idx, extra = null) {
-    if (!this.canUseSkill(idx)) return false;
-    const p = this.players[idx];
-    const heroId = p.hero.id;
-    p.energy -= p.hero.skillCost;
-    p.skillUsed = true;
-    this.emit('onEnergyChange', idx);
-    this.emit('onSkill', idx, p.hero.skillName);
-    this.emit('onQuote', idx, p.hero.lines.skill);
-    this.log(`${p.hero.name} 发动【${p.hero.skillName}】！`, 'skill');
+  skillAvailability(idx) {
+    return getSkillAvailability(this, this.players[idx]);
+  }
 
-    if (heroId === 'zhugeliang') {
-      if (this.revealed < 5) {
-        const nextCard = this.board[this.revealed];
-        p.peekCard = nextCard;
-        if (p.isHuman) this.emit('onPeek', idx, nextCard, this.revealed + 1);
-      }
-    } else if (heroId === 'diaochan') {
-      const targets = this.activePlayers().filter((q) => q.idx !== idx);
-      if (targets.length > 0) {
-        const target = targets[Math.floor(Math.random() * targets.length)];
-        const cardIdx = 1 + Math.floor(Math.random() * 2);
-        p.spied = { targetIdx: target.idx, cardIdx, card: target.hole[cardIdx - 1] };
-        if (p.isHuman) this.emit('onSpy', idx, target.idx, cardIdx, target.hole[cardIdx - 1]);
-      }
-    } else if (heroId === 'hanxin') {
-      let cardIdx = extra && extra.cardIdx;
-      if (!cardIdx) cardIdx = p.hole[0].rank <= p.hole[1].rank ? 1 : 2;
-      p.hole[cardIdx - 1] = draw(this.deck);
-      this.emit('onHoleChange', idx);
-    } else if (heroId === 'xiangyu') {
-      this.raiseBan = true;
-      this.raiseBanSource = idx;
-      if (this.waitingIdx) {
-        const hp2 = this.players[this.waitingIdx];
-        this.emit('onAwaitAction', hp2.idx, this.getOptions(hp2));
-      }
-    } else if (heroId === 'lvbuwei') {
-      p.qihuo = true;
-    } else if (heroId === 'lianpo') {
-      p.jianbi = true;
-    }
-    return true;
+  getSkillPrompt(idx) {
+    return getSkillInput(this, this.players[idx]);
+  }
+
+  useSkill(idx, selection = null) {
+    return executeActiveSkill(this, this.players[idx], selection);
   }
 }
