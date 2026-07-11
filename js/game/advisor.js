@@ -8,7 +8,7 @@ import {
   effectiveStack,
   positionAdjustment,
   preflopStrength,
-} from './ai.js?v=advisor-exports';
+} from './ai.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 
@@ -358,24 +358,35 @@ function analyzePostflop(engine, player, opts, context) {
 export function decisionKey(engine, player, opts) {
   const cards = [...player.hole, ...engine.revealedBoard()]
     .map((card) => `${card.rank}${card.suit}`).join('-');
+  const activePlayers = engine.activePlayers().map((item) => item.idx).join(',');
   return [
     engine.round, engine.street, engine.revealed, engine.currentBet,
     engine.totalPot(), engine.streetRaiseCount || 0, player.idx,
     player.hp, player.betStreet, opts.toCall, opts.callAmt,
-    opts.tiers.map((tier) => `${tier.key}:${tier.cost}`).join(','), cards,
+    opts.tiers.map((tier) => `${tier.key}:${tier.cost}`).join(','), cards, activePlayers,
   ].join('|');
 }
 
-export function analyzeDecision(engine, player, opts) {
+export function estimateEquity(engine, player, simulations = Config.ADVICE_SIMS || 360) {
+  if (!engine || !player || player.hole?.length < 2) return null;
+  const numOpponents = Math.max(1, engine.activePlayers().length - 1);
+  return WinRate.estimate(
+    player.hole, engine.revealedBoard(), numOpponents, simulations,
+  );
+}
+
+export function analyzeDecision(engine, player, opts, { equity: suppliedEquity } = {}) {
   if (!engine || !player || !opts || player.hole.length < 2) return null;
   const numOpponents = Math.max(1, engine.activePlayers().length - 1);
   const pot = Math.max(1, engine.totalPot());
   const blinds = Config.getBlinds(engine.round);
   const bb = Math.max(1, blinds.bb);
   const stack = effectiveStack(engine, player);
-  const equity = WinRate.estimate(
-    player.hole, engine.revealedBoard(), numOpponents, Config.ADVICE_SIMS || 360,
-  );
+  const equity = suppliedEquity !== null
+    && suppliedEquity !== undefined
+    && Number.isFinite(Number(suppliedEquity))
+    ? clamp(Number(suppliedEquity))
+    : estimateEquity(engine, player);
   const context = {
     equity,
     numOpponents,

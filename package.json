@@ -4,10 +4,23 @@
   "description": "群英决 · 自托管网页版（英雄对决表现 × 德州竞技内核，单机 + 联机组队对战）",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
-    "web": "npx --yes serve -l 8080 .",
+    "web": "node scripts/serve-static.mjs 8080 .",
+    "web:dist": "node scripts/serve-static.mjs 8080 dist/public",
+    "build:static": "node test/assets.mjs && node scripts/build-static.mjs",
+    "build:h5-assets": "python scripts/build_h5_assets.py",
+    "test:assets": "node test/assets.mjs",
+    "test:server": "npm --prefix server test",
+    "test:e2e": "playwright test",
+    "test:all": "npm run test && npm run test:server && npm run build:static && npm run test:e2e",
     "server": "node server/server.mjs 8790",
     "postinstall": "cd server && npm install",
     "test": "node test/audio.mjs && node test/poker_rules.mjs && node test/action_hint.mjs && node test/advisor.mjs && node test/skills.mjs && node test/smoke.mjs && node test/mp_smoke.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
   }
 }

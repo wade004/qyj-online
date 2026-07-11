@@ -320,6 +320,9 @@ export function getSkillAvailability(engine, player) {
   if (engine.street === 'idle' || !skill.timings.includes(engine.street)) {
     return { ok: false, reason: '当前阶段不能发动', skill, cost };
   }
+  if (Number(engine.actingIdx) !== Number(player.idx)) {
+    return { ok: false, reason: '仅可在轮到你行动时发动', skill, cost };
+  }
   if (player.energy < cost) {
     return { ok: false, reason: `能量不足（${player.energy}/${cost}⚡）`, skill, cost };
   }

@@ -88,7 +88,19 @@ const holes = {
 };
 for (const p of engine.players.slice(1)) p.hole = holes[p.hero.id];
 
+const gatedPlayer = engine.players[1];
+engine.actingIdx = 2;
+const gatedEnergy = gatedPlayer.energy;
+const gatedStatuses = gatedPlayer.skillStatuses.length;
+assert(!engine.canUseSkill(gatedPlayer.idx), '别人的行动回合不得显示主动技能可用');
+assert(engine.skillAvailability(gatedPlayer.idx).reason === '仅可在轮到你行动时发动',
+  '非本人回合应返回明确的技能门禁原因');
+assert(!engine.useSkill(gatedPlayer.idx), '别人的行动回合不得发动主动技能');
+assert(gatedPlayer.energy === gatedEnergy && !gatedPlayer.skillUsed
+  && gatedPlayer.skillStatuses.length === gatedStatuses, '被门禁拒绝的技能不得扣能量或写入状态');
+
 for (const p of engine.players.slice(1)) {
+  engine.actingIdx = p.idx;
   const skill = getActiveSkill(p.hero);
   assert(checkSkillCondition(skill.condition, { engine, player: p }), `${p.hero.name} 测试暗令应满足条件`);
   const coreBefore = {
@@ -102,6 +114,7 @@ for (const p of engine.players.slice(1)) {
   assert(engine.totalPot() === coreBefore.pot, `${p.hero.name} 不得修改血池`);
 }
 
+engine.actingIdx = 0;
 const hanxin = engine.players.find((p) => p && p.hero.id === 'hanxin');
 const hanxinEnergy = hanxin.energy;
 dispatchSkillEvent(engine, 'STREET_ADVANCE', { from: 'preflop' });
@@ -143,6 +156,7 @@ const setup = (heroIds, listeners = {}) => {
     p.skillData = { flags: Object.create(null), copiedPassiveIds: [], revealedCard: null, raisedThisRound: false };
     p.hole = [C(8, 1), C(4, 2)];
   }
+  e.actingIdx = 1;
   return e;
 };
 

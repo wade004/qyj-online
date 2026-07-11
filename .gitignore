@@ -1,2 +1,9 @@
 node_modules/
+dist/
+test-results/
+playwright-report/
+.playwright/
+logs/
 .DS_Store
+server/data/*.sqlite
+server/data/*.sqlite-*

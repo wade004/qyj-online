@@ -1,5 +1,6 @@
 // 群英决 web 版逻辑冒烟测试（node test/smoke.mjs）
 // 与 Maker 版 lupa 冒烟等价：牌型自检 + 整局完赛 + 血池不丢失 + 小额保险受控
+import './battle_session.mjs';
 import { Engine } from '../js/game/engine.js';
 import { evalBest } from '../js/game/handeval.js';
 import * as AI from '../js/game/ai.js';

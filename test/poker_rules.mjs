@@ -165,6 +165,8 @@ assert(multiShowdownData.pots[1].netWinnings[2] === 450,
   '边池1赢家的净赢应只扣除其在边池1的150投入');
 assert(multiShowdownData.pots[2].netWinnings[3] === 250,
   '边池2赢家的净赢应扣除合并后其在该池的150投入');
+assert(multiShowdownData.netResult[5] === -350,
+  '亮招权威净额应包含已退避但有投入的玩家');
 
 let showdownData = null;
 const showdownEngine = new Engine(ids, { onShowdown(data) { showdownData = data; } }, new Set());
@@ -190,6 +192,8 @@ assert(showdownData.pots[0].netWinnings[1] === 300, '主池赢家扣除主池投
 assert(showdownData.pots[1].netWinnings[2] === 400, '边池赢家扣除边池投入后应净赢400');
 assert(showdownData.netResult[1] === 300 && showdownData.netResult[2] === 300,
   '座位总提示应按总奖金减去本回合总投入，二人均净赢300');
+assert(showdownData.netResult[4] === -300,
+  '座位总提示应包含已退避玩家的完整损失');
 
 // 只有一人多投入的部分不是边池，必须作为未跟注筹码返还。
 potEngine.players[1].betRound = 100;
@@ -205,9 +209,17 @@ assert(pendingLayers[1].label === '待跟注' && pendingLayers[1].amount === 200
 
 // 单挑时按钮位同时是小盲，且翻牌前先行动。
 let blindEvent = null;
+let turnEvent = null;
+let actionEvent = null;
 const headsUp = new Engine(ids, {
   onBlindsPosted(sbIdx, sbAmt, bbIdx, bbAmt) {
     blindEvent = { sbIdx, sbAmt, bbIdx, bbAmt };
+  },
+  onTurnStart(idx) {
+    turnEvent = { idx, actingIdx: headsUp.actingIdx };
+  },
+  onAction(idx, key, amount) {
+    actionEvent = { idx, key, amount, actingIdx: headsUp.actingIdx };
   },
 }, new Set());
 for (let i = 3; i <= 6; i++) {
@@ -217,7 +229,54 @@ for (let i = 3; i <= 6; i++) {
 headsUp.startRound();
 assert(blindEvent?.sbIdx === headsUp.dealerIdx, '单挑按钮位必须下小盲');
 assert(blindEvent?.bbIdx !== headsUp.dealerIdx, '单挑非按钮位必须下大盲');
-assert(headsUp.actingIdx === blindEvent.bbIdx, '翻牌前应从大盲之后的按钮/小盲开始行动');
+assert(headsUp.actingIdx === 0, '发完盲注后的演出等待期不应误报正在行动者');
+assert(headsUp.players[blindEvent.sbIdx].lastAction?.key === 'smallBlind'
+  && headsUp.players[blindEvent.sbIdx].lastAction?.amount === blindEvent.sbAmt,
+'小盲状态应记录为公开的最近行动');
+assert(headsUp.players[blindEvent.bbIdx].lastAction?.key === 'bigBlind'
+  && headsUp.players[blindEvent.bbIdx].lastAction?.amount === blindEvent.bbAmt,
+'大盲状态应记录为公开的最近行动');
+headsUp.update(1.4);
+assert(turnEvent?.idx === blindEvent.sbIdx && turnEvent.actingIdx === blindEvent.sbIdx,
+  '翻牌前应从大盲之后的按钮/小盲开始行动，且 onTurnStart 快照标记当前行动者');
+const headsUpActor = headsUp.players[turnEvent.idx];
+headsUp.applyAction(headsUpActor, { type: 'call' });
+assert(actionEvent?.idx === headsUpActor.idx && actionEvent.key === 'call'
+  && actionEvent.actingIdx === 0, 'onAction 发出前必须清除正在行动者，避免重连误报');
+assert(headsUpActor.lastAction?.key === 'call'
+  && headsUpActor.lastAction?.amount === blindEvent.bbAmt - blindEvent.sbAmt
+  && headsUpActor.lastAction?.street === 'preflop'
+  && headsUpActor.lastAction?.round === 1,
+'玩家最近行动应携带动作、金额、街道与回合');
+
+const streetStateEngine = new Engine(ids, {}, new Set());
+streetStateEngine.round = 1;
+streetStateEngine.street = 'preflop';
+streetStateEngine.board = [C(2, 1), C(3, 2), C(4, 3), C(9, 4), C(13, 1)];
+for (let i = 1; i <= 6; i++) {
+  const player = streetStateEngine.players[i];
+  player.alive = true;
+  player.folded = false;
+  player.allIn = false;
+  player.hole = [C(10 + i, 1), C(8 + i, 2)];
+  player.lastAction = { key: 'check', amount: 0, street: 'preflop', round: 1 };
+}
+streetStateEngine.players[2].folded = true;
+streetStateEngine.players[2].lastAction = {
+  key: 'fold', amount: 0, street: 'preflop', round: 1,
+};
+streetStateEngine.players[3].allIn = true;
+streetStateEngine.players[3].lastAction = {
+  key: 'allin', amount: 1500, street: 'preflop', round: 1,
+};
+streetStateEngine.actingIdx = 4;
+streetStateEngine.advanceStreet();
+assert(streetStateEngine.actingIdx === 0, '切换街道期间不得保留正在行动者');
+assert(streetStateEngine.players[1].lastAction === null,
+  '仍可行动的普通玩家跨街后应清除上一街行动');
+assert(streetStateEngine.players[2].lastAction?.key === 'fold'
+  && streetStateEngine.players[3].lastAction?.key === 'allin',
+'已退避或决死玩家跨街后应保留终局状态');
 
 // 所有后续下注行动封闭时，必须在发剩余公共牌之前立即公开在局底牌，且只公开一次。
 let allInRevealCount = 0;

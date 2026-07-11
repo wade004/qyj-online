@@ -9,6 +9,23 @@ import { getHero, HEROES } from '../game/heroes.js';
 import { getSkillAvailability, getSkillInput } from '../game/skills.js';
 
 const card = (c) => ({ rank: c.r, suit: c.s });
+const ATTACK_KEYS = new Set(Config.ATTACK_TIERS.map((tier) => tier.key));
+
+function normalizeActionClock(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const idx = Number(raw.idx);
+  const remainingMs = Number(raw.remainingMs);
+  const totalMs = Number(raw.totalMs);
+  if (!Number.isInteger(idx) || idx < 1 || !Number.isFinite(remainingMs)) return null;
+  return {
+    turnId: raw.turnId ?? null,
+    idx,
+    remainingMs: Math.max(0, remainingMs),
+    totalMs: Math.max(1000, Number.isFinite(totalMs) ? totalMs : Config.ACTION_TIME * 1000),
+    serverNow: Number(raw.serverNow) || null,
+    deadlineAt: Number(raw.deadlineAt) || null,
+  };
+}
 
 export class RemoteEngine {
   /**
@@ -27,6 +44,12 @@ export class RemoteEngine {
         hero: getHero(p.heroId) || HEROES[0],
         playerName: p.name,
         isHuman: p.isHuman,
+        playerId: p.playerId || null,
+        shortId: p.shortId || null,
+        emblem: p.emblem || '侠',
+        pokerStats: p.pokerStats && typeof p.pokerStats === 'object'
+          ? { ...p.pokerStats }
+          : null,
         hp: Config.INIT_HP,
         energy: Config.INIT_ENERGY,
         alive: true,
@@ -35,6 +58,8 @@ export class RemoteEngine {
         allIn: false,
         betStreet: 0,
         betRound: 0,
+        acted: false,
+        lastAction: null,
         skillUsed: false,
         skillStatuses: [],
         passiveUsed: Object.create(null),
@@ -46,11 +71,18 @@ export class RemoteEngine {
     this.revealed = 0;
     this.round = 0;
     this.street = 'idle';
+    this.dealerIdx = 0;
+    this.currentBet = 0;
+    this.streetRaiseCount = 0;
+    this.actingIdx = 0;
+    this.lastAggressiveWager = null;
     this.pot = 0;
     this.potLayers = [{ label: '主池', amount: 0, kind: 'main' }];
     this.potDisplay = [{ label: '当前血池', amount: 0, kind: 'main' }];
     this.waitingIdx = null;
+    this.actionClock = null;
     this.gameOver = false;
+    this.lastRanking = null;
     this.time = 0;
     this.queue = [];
   }
@@ -81,9 +113,14 @@ export class RemoteEngine {
   // ---- 行动转发 ----
 
   playerAct(act) {
-    this.send({ cmd: 'act', type: act.type, tierKey: act.tier ? act.tier.key : undefined });
+    if (this.waitingIdx !== this.myIdx) return false;
+    return this.send({ cmd: 'act', type: act.type, tierKey: act.tier ? act.tier.key : undefined }) !== false;
   }
   useSkill(idx, selection = null) {
+    if (Number(idx) !== Number(this.myIdx)
+      || Number(this.actingIdx) !== Number(this.myIdx)
+      || Number(this.waitingIdx) !== Number(this.myIdx)
+      || !this.canUseSkill(idx)) return false;
     this.send({ cmd: 'skill', selection: selection || undefined });
     return true;
   }
@@ -107,12 +144,31 @@ export class RemoteEngine {
 
   applySnapshot(s) {
     if (!s) return;
+    const previousStreet = this.street;
     this.round = s.round ?? this.round;
     this.street = s.street ?? this.street;
+    this.dealerIdx = s.dealerIdx ?? this.dealerIdx;
+    this.streetRaiseCount = s.streetRaiseCount ?? this.streetRaiseCount;
+    if (Object.prototype.hasOwnProperty.call(s, 'actingIdx')) {
+      this.actingIdx = Number.isInteger(s.actingIdx) ? s.actingIdx : 0;
+    } else if (s.waitingIdx != null) {
+      // Legacy snapshots only exposed the human seat waiting for input.
+      this.actingIdx = s.waitingIdx;
+    }
     this.pot = s.pot ?? this.pot;
     if (s.potLayers) this.potLayers = s.potLayers.map((layer) => ({ ...layer }));
-    if (s.potDisplay) this.potDisplay = s.potDisplay.map((item) => ({ ...item }));
+    if (s.potDisplay) {
+      this.potDisplay = s.potDisplay.map((item) => ({ ...item }));
+      if (!s.potLayers) {
+        this.potLayers = this.potDisplay
+          .filter((item) => item.kind !== 'reference')
+          .map((item) => ({ ...item }));
+      }
+    }
     this.waitingIdx = s.waitingIdx ?? null;
+    if (Object.prototype.hasOwnProperty.call(s, 'actionClock')) {
+      this.actionClock = normalizeActionClock(s.actionClock);
+    }
     this.revealed = s.revealed ?? this.revealed;
     if (s.board) this.board = s.board.map(card);
     if (s.players) {
@@ -122,17 +178,117 @@ export class RemoteEngine {
         p.hp = sp.hp; p.energy = sp.energy; p.alive = sp.alive;
         p.folded = sp.folded; p.allIn = sp.allIn;
         p.betStreet = sp.betStreet; p.betRound = sp.betRound;
+        if (Object.prototype.hasOwnProperty.call(sp, 'acted')) p.acted = !!sp.acted;
+        if (Object.prototype.hasOwnProperty.call(sp, 'lastAction')) {
+          p.lastAction = sp.lastAction && typeof sp.lastAction === 'object'
+            ? { ...sp.lastAction }
+            : null;
+        }
         p.skillUsed = sp.skillUsed;
         p.skillStatuses = (sp.skillModifiers || []).map((status) => ({ ...status }));
       }
     }
+    this.currentBet = s.currentBet ?? Math.max(
+      0,
+      ...this.players.slice(1).map((player) => player?.betStreet || 0),
+    );
+    const reference = this.potDisplay.find((item) => item.kind === 'reference');
+    if (Object.prototype.hasOwnProperty.call(s, 'lastAggressiveWager')) {
+      this.lastAggressiveWager = s.lastAggressiveWager ? { ...s.lastAggressiveWager } : null;
+    } else if (reference) {
+      this.lastAggressiveWager = {
+        actorIdx: reference.actorIdx || null,
+        amount: reference.wagerAmount || 0,
+        potBefore: reference.amount || 0,
+        ratio: reference.ratio || 0,
+      };
+    } else if (previousStreet !== this.street) {
+      this.lastAggressiveWager = null;
+      if (s.streetRaiseCount == null) this.streetRaiseCount = 0;
+    }
   }
 
   onMessage(msg) {
+    const previousCurrentBet = this.currentBet;
     this.applySnapshot(msg.s);
     const a = msg.a || {};
     const ev = msg.ev;
     const L = this.listeners;
+    const snapshotHasPlayerActions = Array.isArray(msg.s?.players)
+      && msg.s.players.some((player) => Object.prototype.hasOwnProperty.call(player, 'acted')
+        || Object.prototype.hasOwnProperty.call(player, 'lastAction'));
+
+    if (ev === 'onRoundStart') {
+      this.actingIdx = 0;
+      this.actionClock = null;
+      if (!snapshotHasPlayerActions) {
+        for (const player of this.players.slice(1)) {
+          player.acted = false;
+          player.lastAction = null;
+        }
+      }
+    } else if (ev === 'onBlindsPosted' && !snapshotHasPlayerActions) {
+      const sb = this.players[a.sbIdx];
+      const bb = this.players[a.bbIdx];
+      if (sb) sb.lastAction = {
+        key: 'smallBlind', amount: Number(a.sbAmt) || 0,
+        street: this.street, round: this.round,
+      };
+      if (bb) bb.lastAction = {
+        key: 'bigBlind', amount: Number(a.bbAmt) || 0,
+        street: this.street, round: this.round,
+      };
+    } else if (ev === 'onTurnStart' || ev === 'onAwaitAction') {
+      this.actingIdx = Number.isInteger(a.idx) ? a.idx : 0;
+      if (a.clock) this.actionClock = normalizeActionClock(a.clock);
+    } else if (ev === 'onActionClock') {
+      this.actionClock = normalizeActionClock(a.clock);
+      if (this.actionClock) this.actingIdx = this.actionClock.idx;
+    } else if (ev === 'onAction') {
+      this.actingIdx = 0;
+      this.actionClock = null;
+      const player = this.players[a.idx];
+      if (player && !snapshotHasPlayerActions) {
+        player.acted = true;
+        player.lastAction = {
+          key: a.key,
+          amount: Number(a.amount) || 0,
+          street: this.street,
+          round: this.round,
+        };
+        if (ATTACK_KEYS.has(a.key)) {
+          for (const other of this.players.slice(1)) {
+            if (other.idx !== a.idx) other.acted = false;
+          }
+        }
+      }
+    } else if (ev === 'onStreet') {
+      this.actingIdx = 0;
+      this.actionClock = null;
+      if (!snapshotHasPlayerActions) {
+        for (const player of this.players.slice(1)) {
+          player.acted = false;
+          if (!player.folded && !player.allIn) player.lastAction = null;
+        }
+      }
+    } else if (['onAllInReveal', 'onPotAwarded', 'onShowdown', 'onRoundEnd', 'onGameOver']
+      .includes(ev)) {
+      this.actingIdx = 0;
+      this.actionClock = null;
+    }
+
+    if (ev === 'onRoundStart') {
+      this.dealerIdx = a.dealerIdx ?? this.dealerIdx;
+      if (msg.s?.streetRaiseCount == null) this.streetRaiseCount = 0;
+      if (!msg.s?.lastAggressiveWager) this.lastAggressiveWager = null;
+    } else if (ev === 'onStreet') {
+      if (msg.s?.streetRaiseCount == null) this.streetRaiseCount = 0;
+      if (!msg.s?.lastAggressiveWager) this.lastAggressiveWager = null;
+    } else if (ev === 'onAction' && msg.s?.streetRaiseCount == null) {
+      if (ATTACK_KEYS.has(a.key) || (a.key === 'allin' && this.currentBet > previousCurrentBet)) {
+        this.streetRaiseCount++;
+      }
+    }
 
     if (ev === 'hole') {
       const p = this.players[this.myIdx];
@@ -148,6 +304,7 @@ export class RemoteEngine {
         playerName: r.name,
         hp: r.hp, alive: r.alive, deathRound: r.deathRound,
       }));
+      this.lastRanking = ranking;
       if (L.onGameOver) L.onGameOver(ranking);
       return;
     }
@@ -189,8 +346,9 @@ export class RemoteEngine {
         case 'onLog': handler(a.text, a.kind); break;
         case 'onRoundStart': handler(a.round, a.blinds, a.dealerIdx); break;
         case 'onBlindsPosted': handler(a.sbIdx, a.sbAmt, a.bbIdx, a.bbAmt); break;
-        case 'onTurnStart': handler(a.idx); break;
-        case 'onAwaitAction': handler(a.idx, a.opts, a.remain); break;
+        case 'onTurnStart': handler(a.idx, a.clock || this.actionClock); break;
+        case 'onAwaitAction': handler(a.idx, a.opts, a.remain, a.clock || this.actionClock); break;
+        case 'onActionClock': handler(a.clock || this.actionClock); break;
         case 'onAction': handler(a.idx, a.key, a.amount); break;
         case 'onStreet': handler(a.street, a.revealTo); break;
         case 'onSkill': handler(a.idx, a.skillId, a.skillName, a.presentation); break;

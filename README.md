@@ -7,9 +7,11 @@
 （公共牌）逐步揭示战局，通过灌注气血（下注）向对手施压，以杀招（牌型）定胜负。
 界面与交互参考经典国风卡牌游戏的武将牌美学，底层完整保留德州扑克久经验证的博弈规则。
 
-- **零构建**：纯 HTML/CSS/原生 ES Modules，无打包器、无框架
+- **原生双入口**：纯 HTML/CSS/ES Modules，无运行时框架；PC 与 H5 分开启动、共享会话和规则层
+- **平台隔离**：`index.html` 始终为 PC，`h5.html` 始终为手机横屏，不按视口自动串页
 - **零信任**：联机采用权威服务器架构，暗牌只私发本人，从协议层杜绝透视外挂
 - **零外部依赖**：唯一的运行时依赖是对战服的 `ws`（WebSocket 库）
+- **玩家数据持久化**：昵称、纹章、累计战绩、最近对局和公开行动扑克统计由服务端 SQLite 保存，浏览器仅保留设备凭据与缓存
 - **单机/联机共用一套逻辑**：`js/game/` 纯逻辑层同时驱动浏览器单机与 Node 对战服
 
 ---
@@ -61,8 +63,11 @@
 - 12 回合赛制、气血淘汰、能量和英雄技能属于本游戏规则，因此整体并非原样现金桌德州。
 - 亮招时战报会逐项显示“主池 / 边池 1 / 边池 2”及各自赢家。
 - 桌面中央常驻显示当前主池/边池；仅轮到真人操作时，临时显示上次主动下注前的血池、下注金额及占池比例。
-- 轮到真人操作时会生成只读的 GTO 近似建议：结合位置、有效筹码、SPR、底池赔率、多人池风险、牌面结构与听牌，给出主建议、备选及理由。
+- 轮到真人操作时会生成只读的 GTO 近似建议：结合位置、有效筹码、SPR、底池赔率、多人池风险、牌面结构与听牌，给出主建议、备选频率、把握度、理由及定量指标；PC/H5 共用“AI辅助”偏好，且建议模块不会自动执行行动。
 - 结算飘字只显示净收益：总奖金扣除本人投入；边池战报仅扣除本人在该边池的投入。
+- H5 在翻牌、转牌和河牌阶段仅对使用本人暗牌形成的牌型升级提示“中牌”，同步高亮组成牌；每手按总净收益显示胜、负或平，整局结算明确显示胜利/失败、名次与前三标记。
+- H5 亮牌结算集中展示所有未弃牌玩家的两张暗牌、武侠牌型名、标准德州类型、获池毛额和整手净输赢；主池、边池与平分均使用服务端权威结果。
+- H5 每个座位持续显示“尚未行动、等待他人、轮到行动、已操作、待响应、已退避、决死、阵亡”；已操作和待响应会携带具体操作与数值，退避/决死跨下注街保留，联机重连从权威快照恢复。
 - 有人在决死且所有后续下注行动已经封闭时，立即公开全部在局底牌，再自动发完公共牌。
 
 ### AI 策略
@@ -103,6 +108,15 @@ AI 使用不读取暗牌的 GTO-inspired 决策层：翻前位置范围、有效
 - 房主随时可开始；选将阶段**英雄不可重复**（先选先得、可换选、60 秒超时随机分配）
 - 不足 6 人由 AI 自动补位（5 种性格：激进/紧手/诈唬/紧凶/松浪，英雄不重复）
 - 行动限时 30 秒（可消耗 1⚡ 延长 30 秒），超时与断线自动托管
+- 短时断线默认保留会话 90 秒：恢复原队伍、房主身份、选将、战斗座位、本人暗牌或未确认的结算页；超时后才清退并转移房主
+
+### 玩家扑克统计
+
+- 大厅与房间可打开玩家统计；PC 对局鼠标悬停/聚焦头像显示迷你 HUD，点击查看详情，H5 点击武将立牌打开抽屉。
+- 核心指标为 `VPIP / PFR / 3Bet / AF / Hands`，详情补充 `WTSD / W$SD / CBet / Fold CBet`。
+- 默认统计范围为**近 30 天、最多最近 200 手**；0、1–29、30–99、100 手以上分别显示无、低、中、高可信度。
+- 服务端只把公开下注行动转换为逐手计数，不保存暗牌或牌力；统计只描述历史频率，不向当前行动输出自动建议。
+- 完整公式、分母和产品边界见 [`docs/poker-player-stats-design.md`](docs/poker-player-stats-design.md)。
 
 ---
 
@@ -126,30 +140,41 @@ AI 使用不读取暗牌的 GTO-inspired 决策层：翻前位置范围、有效
 - **联机模式**：服务器实例化引擎（权威），客户端 `RemoteEngine` 镜像公开状态快照并转发操作；
   对局界面 `battle.js` 对两种引擎完全无感
 - **协议**：WebSocket + JSON。客户端→服务器为 `{cmd:...}` 命令
-  （create/join/leave/rename/startPick/pick/startGame/act/skill/extend/…），
+  （resume/create/join/leave/rename/startPick/pick/startGame/act/skill/extend/…），
   服务器→客户端为 `{ev:..., a:载荷, s:公开快照}` 事件流；
   **暗牌通过 `hole` 事件只私发给持有者本人**
+- **会话恢复**：加密随机恢复凭证只存于 `sessionStorage`，通过 WebSocket 首条消息提交，不进入 URL 或日志；恢复成功立即轮换，旧凭证失效
+- **玩家数据**：`server/player-store.mjs` 使用 Node 内置 SQLite；schema v2 将赛果和逐手公开行动统计放在同一事务中写入，并以比赛、回合、玩家联合唯一键保证幂等
 
 ```
 qyj-online/
-├── index.html          # 入口
-├── package.json        # npm run web / server / test
-├── css/style.css       # 暖色水墨鎏金主题
-├── assets/             # 美术资产（AI 生成原创：16英雄立绘/13阶牌面/花色/牌背/背景）
+├── index.html          # PC 独立入口
+├── h5.html             # H5 独立入口（仅横屏）
+├── package.json        # web / build / server / unit / e2e 命令
+├── css/
+│   ├── style.css       # 共享与既有 PC 对局样式
+│   ├── pc/             # PC 大厅、玩家系统、房间样式
+│   └── h5/             # H5 横屏专用布局与安全区样式
+├── assets/             # 源资源；runtime-manifest.json 是上线资源白名单
+│   └── h5/             # 手机端 WebP 尺寸变体
 ├── js/
 │   ├── game/           # 纯逻辑层（两端共用）
-│   ├── net/            # RemoteEngine 联机镜像代理
-│   ├── ui/             # 模式选择/选将/对局/结算/联机大厅/演出特效
-│   └── main.js         # 入口与 rAF 主循环
+│   ├── entry/          # pc.js / h5.js 平台启动器
+│   ├── net/            # 协议、WebSocket 与 RemoteEngine
+│   ├── session/        # 单机/联机统一会话边界
+│   ├── services/       # 玩家档案、资源变体等跨页面服务
+│   └── ui/             # 共享、PC、H5 三层界面实现
+├── scripts/            # H5 资源生成、静态发布白名单构建、开发服务器
 ├── server/             # Node WebSocket 权威对战服（独立 package.json，依赖 ws）
-└── test/               # 单机冒烟 + 联机双客户端端到端测试
+├── test/               # 规则、资源、服务端与真实浏览器全流程测试
+└── dist/public/        # npm run build:static 生成；唯一推荐的静态发布根目录
 ```
 
 ---
 
 ## 本地运行
 
-**环境要求**：Node.js ≥ 18（推荐 20+）。前端静态服务可用 Node 或 Python 任选。
+**环境要求**：Node.js ≥ 24（服务端使用内置 `node:sqlite`）。前端静态服务可用 Node 或 Python 任选。
 
 ```bash
 git clone https://github.com/wade004/qyj-online.git
@@ -164,10 +189,30 @@ npm run web          # → http://localhost:8080
 npm run server       # → ws://localhost:8790
 ```
 
-浏览器打开 **http://localhost:8080**：
+对战服首次启动会自动创建 `server/data/qyj.sqlite`。玩家设备标识仅以 SHA-256 指纹入库；
+稳定玩家编号、昵称、纹章、对局/胜场/前三/最佳名次、最近 10 场战绩及近 30 天/最近 200 手扑克统计以 SQLite 为权威来源。
+测试可通过 `startServer(port, { databasePath: ':memory:' })` 使用隔离内存库。
 
-- **单机·人机对战**：无需对战服，选英雄直接开打（1 真人 + 5 AI）；真人阵亡时本局立即结束
-- **联机·组队对战**：需要对战服在线；默认连接 `ws://<当前域名>:8790`
+`npm run web` 仅用于源码目录开发。上线前必须执行白名单构建并从构建目录验收：
+
+```bash
+npm run test:assets   # 校验资源存在性、音效键与真实编码
+npm run build:static  # 输出 dist/public
+npm run web:dist      # 只托管上线白名单，→ http://localhost:8080
+```
+
+仅在原始立绘或背景更新时需要重新生成 H5 WebP：先安装 Python 3 与 Pillow，
+再执行 `npm run build:h5-assets`；常规发布直接使用已生成并纳入版本管理的变体。
+
+构建只复制 `index.html`、`h5.html` 的 CSS/JS 依赖和 `assets/runtime-manifest.json` 中登记的资源；
+`server/`、`test/`、`docs/`、`logs/`、参考素材及其他源文件不会进入静态发布目录。
+
+浏览器按平台打开：
+
+- **PC**：`http://localhost:8080/index.html`，宽屏或窄屏都保持 PC 交互
+- **手机 H5**：`http://localhost:8080/h5.html`，进入后要求横屏；竖屏仅显示阻断层，游戏内容不可操作
+- H5 手牌与公共牌使用由 PC 点数武器牌面生成的轻量 WebP 变体和花色素材；未揭示牌使用鎏金龙纹牌背，并保留阶段标签。
+- 两个入口都完整支持单机与联机；联机默认连接 `ws://<当前域名>:8790`
 
 > 注意：ES Modules 要求 http(s) 协议加载，**直接双击 index.html（file://）无法运行**。
 
@@ -181,7 +226,7 @@ npm run server       # → ws://localhost:8790
 
 ```bash
 sudo apt update && sudo apt install -y nginx nodejs npm
-node -v   # 需要 ≥ 18，过旧可用 NodeSource 或 nvm 安装新版
+node -v   # 需要 ≥ 24，过旧可用 NodeSource 或 nvm 安装新版
 ```
 
 ### 2. 上传项目并安装依赖
@@ -191,8 +236,10 @@ node -v   # 需要 ≥ 18，过旧可用 NodeSource 或 nvm 安装新版
 scp -r qyj-online/ user@your-host:/var/www/qyj-online
 # 或在服务器上直接 git clone https://github.com/wade004/qyj-online.git
 
-# 服务器执行
-cd /var/www/qyj-online && npm install
+# 服务器执行：安装依赖、校验资源并生成静态发布目录
+cd /var/www/qyj-online
+npm install
+npm run build:static
 ```
 
 ### 3. 对战服务常驻（systemd）
@@ -229,17 +276,23 @@ server {
     listen 80;
     server_name your-domain.com;
 
-    root /var/www/qyj-online;
+    # 只暴露白名单构建产物，禁止把仓库根目录作为 Web Root
+    root /var/www/qyj-online/dist/public;
     index index.html;
 
     location / {
         try_files $uri $uri/ =404;
     }
 
-    # 美术资产文件名含时间戳指纹，可长缓存
+    # 当前仍有固定文件名资源；完成全量内容哈希前不得使用 immutable
     location /assets/ {
-        expires 30d;
-        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+        expires 1h;
+        add_header Cache-Control "public, max-age=3600";
+    }
+
+    location ~ ^/(index|h5)\.html$ {
+        add_header Cache-Control "no-cache";
     }
 
     # WebSocket 反代：同域 /ws → 对战服 8790（HTTPS 下自动升级为 WSS）
@@ -258,7 +311,8 @@ server {
 
 ### 5. 前端指向同域反代
 
-编辑 `index.html`，在 `<head>` 内加一行（让联机走 `/ws` 反代而非直连 8790 端口）：
+编辑源文件 `index.html` 和 `h5.html`，在 `<head>` 内各加一行（让联机走 `/ws` 反代而非直连 8790 端口），
+然后重新执行 `npm run build:static`：
 
 ```html
 <script>window.QYJ_WS_URL=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws'</script>
@@ -287,16 +341,31 @@ sudo certbot --nginx -d your-domain.com
 
 ```bash
 npm test
+npm run test:server
+npm run test:assets
+npm run test:e2e
+# 或一次完成全部校验
+npm run test:all
 ```
 
-包含三套：
+Windows 默认复用本机 Edge；Linux/macOS 首次运行浏览器测试前执行
+`npx playwright install chromium`。也可用 `PLAYWRIGHT_CHANNEL` 指定已安装的 Chrome/Edge 通道。
+
+主要覆盖：
 
 | 测试 | 覆盖 |
 |---|---|
+| `test/assets.mjs` | 运行时清单完整性、资源存在性、技能音效键、真实文件编码；已登记格式遗留给出警告，新增格式错配直接失败 |
 | `test/poker_rules.mjs` | 主池/边池、未跟注返还、单挑盲注、短码全下重开规则及 AI 翻前范围 |
 | `test/skills.mjs` | 32 个技能配置完整性、统一操作码、多字段输入、目标/预测/复制事件，以及扑克核心不可变约束 |
 | `test/smoke.mjs` | 牌型评估 11 例自检（皇家同花顺~高牌+轮子顺）；6 局完整对局（12 回合完赛、血池不丢失、小额保险受控、无负血） |
 | `test/mp_smoke.mjs` | 真实双 WebSocket 客户端端到端：建队/加入/改名(超长拒绝)/选将互斥/AI补位开局(英雄唯一)/打满出冠军/战后回房再开局/**对局中断线托管** |
+| `server/test/server-security.test.mjs` | 非法消息、载荷上限、心跳、优雅关闭、断线清退与房主转移 |
+| `server/test/resume.test.mjs` | 11 项服务端恢复/安全测试中的恢复覆盖：原座位与暗牌、令牌轮换、旧连接替换、离线开局阻断、过期清退、结算恢复与快速关服 |
+| `server/test/player-store.test.mjs` | SQLite 建档、资料更新后重启持久化、战绩事务、幂等累计、最近战绩与输入安全校验 |
+| `server/test/poker-stats.test.mjs` | SQLite v1→v2 迁移、HUD 公式与空分母、30 天/200 手窗口、可信度、逐手与赛果原子写入及重复结算幂等 |
+| `server/test/player-protocol.test.mjs` | 玩家身份绑定、资料 ACK、双视角房间统计、隐私字段隔离，以及完整一局后跨服务重启恢复战绩与扑克统计 |
+| `test/e2e/real-user-flow.spec.mjs` | Playwright 模拟真实用户：PC/H5 入口隔离、PC 三档小屏适配、H5 顶部声音与 568×320 操作可达、只读 GTO 开关/建议/不自动行动、玩家资料与统计交互、全员座位状态与操作金额、中牌特效、全员摊牌明细、单手净输赢、整局胜负名次，以及混合端断网恢复、结算并回房 |
 
 ---
 
@@ -304,8 +373,9 @@ npm test
 
 - **调数值**：公共数值集中在 `js/game/config.js`，技能费用和条件在 `js/game/skills.js`
 - **加英雄**：在 `js/game/skills.js` 或拆分技能清单中配置主动/被动技能，在 `js/game/heroes.js` 引用两个技能 ID；
-  不需要修改引擎。立绘放入 `assets/`，表现通过技能与人物的 `presentation` 字段选择预设
-- **改界面主题**：`css/style.css` 顶部 `:root` 色板
+  不需要修改引擎。立绘放入 `assets/`，表现通过技能与人物的 `presentation` 字段选择预设；
+  需要上线的资源还必须加入 `assets/runtime-manifest.json` 并通过 `npm run test:assets`
+- **改界面主题**：共享兼容色板在 `css/style.css`；平台布局分别在 `css/pc/`、`css/h5/`
 - **服务器容量**：单进程支持多队伍并行对局；队伍上限等常量在 `server/server.mjs` 头部
 - **测试加速**：`startServer(port, { speed: 10 })` 可让演出节奏加速（仅测试用）
 
@@ -330,6 +400,7 @@ A：可以。只部署静态文件、不跑对战服即可，联机入口会提�
 
 ## 版权说明
 
-- 全部美术资产（英雄立绘、牌面、花色符号、牌背、背景）均为 AI 生成的**原创素材**；
+- 上线资源以 `assets/runtime-manifest.json` 为审计边界，发布前必须逐项核验来源、授权与署名要求；
+- 生成中间稿、参考图和第三方迁移素材不得仅因位于 `assets/` 就视为可发布素材；
 - 历史人物为公共领域素材；英雄技能名与台词均为原创；
 - 玩法机制为德州扑克公有规则的世界观包装，详见《群英决》策划案 V1.3（设计文档另存于设计仓库）。

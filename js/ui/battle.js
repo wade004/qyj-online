@@ -5,7 +5,7 @@
 import * as Config from '../game/config.js';
 import { describe } from '../game/handeval.js';
 import * as WinRate from '../game/winrate.js';
-import * as Advisor from '../game/advisor.js?v=pot-metrics';
+import * as Advisor from '../game/advisor.js';
 import { cardText } from '../game/engine.js';
 import * as FX from './effects.js';
 import { playSFX } from '../audio.js';
@@ -19,6 +19,81 @@ const h = (html) => {
 const ATTACK_NAME_BY_KEY = Object.fromEntries(
   Config.ATTACK_TIERS.map((tier) => [tier.key, tier.name]),
 );
+
+const SEAT_POKER_CORE = Object.freeze([
+  { key: 'vpip', label: 'VPIP', name: '主动入池率', description: '翻牌前主动投入筹码进入牌局的比例。', percent: true },
+  { key: 'pfr', label: 'PFR', name: '翻前加注率', description: '翻牌前主动加注或再加注的比例。', percent: true },
+  { key: 'threeBet', label: '3Bet', name: '翻前再加注率', description: '面对已有加注时再次加注的比例。', percent: true },
+  { key: 'af', label: 'AF', name: '激进系数', description: '下注与加注次数相对跟注次数的比值。' },
+  { key: 'hands', label: 'HANDS', name: '统计手数', description: '当前统计样本包含的有效牌局手数。', integer: true },
+]);
+
+const SEAT_POKER_DETAIL = Object.freeze([
+  { key: 'wtsd', label: 'WTSD', name: '入池后摊牌率', description: '看到翻牌后继续打到摊牌的比例。', percent: true },
+  { key: 'wsd', label: 'W$SD', name: '摊牌胜率', description: '进入摊牌后赢得底池的比例。', percent: true },
+  { key: 'cbet', label: 'CBet', name: '持续下注率', description: '翻前进攻者在翻牌后继续下注的比例。', percent: true },
+  { key: 'foldToCbet', label: 'Fold CBet', name: '面对持续下注弃牌率', description: '面对对手持续下注时选择弃牌的比例。', percent: true },
+]);
+
+const SEAT_POKER_KEYS = Object.freeze([
+  'vpip', 'pfr', 'threeBet', 'af', 'wtsd', 'wsd', 'cbet', 'foldToCbet',
+]);
+
+function seatNullableNumber(value, { percent = false, integer = false } = {}) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  if (integer) return Math.max(0, Math.round(number));
+  if (percent) return Math.max(0, Math.min(100, number));
+  return Math.max(0, number);
+}
+
+function seatPokerConfidence(value, hands, available) {
+  if (!available) return { label: '暂无样本', tone: 'empty', value: 0 };
+  const numeric = Number(value);
+  if (value !== null && value !== undefined && value !== '' && Number.isFinite(numeric)) {
+    const percent = Math.max(0, Math.min(100, numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric));
+    return { label: `可信度 ${Math.round(percent)}%`, tone: percent >= 75 ? 'high' : percent >= 45 ? 'medium' : 'low', value: percent };
+  }
+  const text = String(value || '').toLowerCase();
+  if (['high', 'reliable', '高', '高可信'].includes(text)) return { label: '高可信度', tone: 'high', value: 88 };
+  if (['medium', 'mid', '中', '中可信'].includes(text)) return { label: '中可信度', tone: 'medium', value: 60 };
+  if (['low', '低', '低可信'].includes(text)) return { label: '低可信度', tone: 'low', value: 32 };
+  if (hands >= 100) return { label: '高可信度', tone: 'high', value: 88 };
+  if (hands >= 30) return { label: '中可信度', tone: 'medium', value: 60 };
+  return { label: '低可信度', tone: 'low', value: 32 };
+}
+
+function normalizeSeatPokerStats(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const hands = seatNullableNumber(source.hands, { integer: true }) ?? 0;
+  const values = Object.fromEntries(SEAT_POKER_KEYS.map((key) => [
+    key,
+    seatNullableNumber(source[key], { percent: key !== 'af' }),
+  ]));
+  const available = hands > 0 || Object.values(values).some((value) => value !== null);
+  return {
+    ...values,
+    hands,
+    available,
+    rangeLabel: String(source.rangeLabel || '近30天 · 最近200手'),
+    confidence: seatPokerConfidence(source.confidence, hands, available),
+  };
+}
+
+function seatPokerValue(stats, definition) {
+  if (definition.key === 'hands') return String(stats.hands);
+  const value = stats[definition.key];
+  if (value === null || value === undefined) return '—';
+  if (definition.percent) return `${Number(value).toFixed(value >= 10 || Number.isInteger(value) ? 0 : 1)}%`;
+  return Number(value).toFixed(Number.isInteger(value) ? 0 : 1);
+}
+
+function seatPokerTestKey(key) {
+  if (key === 'threeBet') return 'threebet';
+  if (key === 'foldToCbet') return 'fold-to-cbet';
+  return key.toLowerCase();
+}
 
 export function formatActionHint(key, amount = 0, allIn = false) {
   const value = Math.max(0, Math.round(Number(amount) || 0));
@@ -90,7 +165,7 @@ function makeSeat(p, isMe) {
       <div class="status"></div>
       <div class="hand-name"></div>
       <div class="reveal-row"></div>
-      ${p.playerName ? `<div class="pname">${p.playerName}</div>` : ''}
+      <div class="pname"></div>
       <div class="turnbar"><div class="tb-fill"></div></div>
       <div class="hpbar">
         <div class="hp-no">${isMe ? '你' : p.idx}</div>
@@ -100,6 +175,14 @@ function makeSeat(p, isMe) {
     </div>
   </div>`);
   const seat = wrap.querySelector('.seat');
+  const portrait = wrap.querySelector('.portrait');
+  portrait.tabIndex = 0;
+  portrait.setAttribute('role', 'button');
+  portrait.setAttribute('aria-label', `查看${p.playerName || p.hero.name}的扑克统计`);
+  portrait.dataset.testid = `pc-seat-stats-${p.idx}`;
+  const playerName = wrap.querySelector('.pname');
+  if (p.playerName) playerName.textContent = p.playerName;
+  else playerName.remove();
   const revealRow = wrap.querySelector('.reveal-row');
   const rToks = [makeCard('card-mini'), makeCard('card-mini')];
   for (const t of rToks) {
@@ -108,7 +191,7 @@ function makeSeat(p, isMe) {
     revealRow.appendChild(t.el);
   }
   return {
-    root: wrap, seat,
+    root: wrap, seat, portrait,
     betEl: wrap.querySelector('.seat-bet'),
     statusEl: wrap.querySelector('.status'),
     handEl: wrap.querySelector('.hand-name'),
@@ -137,7 +220,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
   const rel = (n) => ((myIdx - 1 + n) % Config.PLAYER_COUNT) + 1;
 
   // ---- DOM 骨架 ----
-  const screen = h(`<div class="screen">
+  const screen = h(`<div class="screen" data-testid="pc-battle">
     <div class="topbar">
       <span class="tb-title">群 英 决</span>
       <span class="tb-round">第 1/${Config.MAX_ROUNDS} 回合</span>
@@ -170,7 +253,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       <div class="bb-me"></div>
       <div class="bb-skill">
         <div class="sk-head">◆ 英雄技能</div>
-        <button class="sk-btn" disabled>${me.hero.skillName}（${me.hero.skillCost}⚡）</button>
+        <button class="sk-btn" data-testid="pc-use-skill" disabled>${me.hero.skillName}（${me.hero.skillCost}⚡）</button>
         <div class="sk-state"></div>
       </div>
       <div class="bb-spacer"></div>
@@ -197,24 +280,88 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
         <div class="timer-row">
           <div class="timer-outer"><div class="timer-bar"></div></div>
           <span class="timer-txt">30s</span>
-          <button class="extend-btn">+30秒 (1⚡)</button>
+          <button class="extend-btn" data-testid="pc-extend-time">+30秒 (1⚡)</button>
         </div>
         <div class="btn-grid">
           <div class="bg-row">
-            <button class="btn-fold" disabled>退避</button>
-            <button class="btn-call" disabled>静观</button>
-            <button class="btn-allin" disabled>决死</button>
+            <button class="btn-fold" data-testid="pc-action-fold" disabled>退避</button>
+            <button class="btn-call" data-testid="pc-action-call" disabled>静观</button>
+            <button class="btn-allin" data-testid="pc-action-allin" disabled>决死</button>
           </div>
           <div class="bg-row">
-            <button class="btn-raiseS" disabled>佯攻</button>
-            <button class="btn-raiseM" disabled>强攻</button>
-            <button class="btn-raiseL" disabled>猛攻</button>
+            <button class="btn-raiseS" data-testid="pc-action-feint" disabled>佯攻</button>
+            <button class="btn-raiseM" data-testid="pc-action-strike" disabled>强攻</button>
+            <button class="btn-raiseL" data-testid="pc-action-fierce" disabled>猛攻</button>
           </div>
         </div>
       </div>
     </div>
   </div>`);
-  app.replaceChildren(screen);
+  // PC battle keeps its desktop composition as a logical canvas. On a small
+  // window, scale an ancestor instead of `.screen`: the latter owns the shake
+  // animation and its transform would otherwise temporarily cancel fitting.
+  const fit = document.createElement('div');
+  fit.className = 'pc-battle-fit';
+  fit.dataset.testid = 'pc-battle-fit';
+  fit.appendChild(screen);
+  app.replaceChildren(fit);
+
+  const PC_BATTLE_MIN_WIDTH = 1320;
+  const PC_BATTLE_MIN_HEIGHT = 900;
+  let fitDestroyed = false;
+  let resizeObserver = null;
+  let removalObserver = null;
+  let fallbackResize = null;
+  let seatStatsLayer = null;
+  let seatStatsKeyHandler = null;
+  let seatStatsReturnFocus = null;
+
+  function updateBattleFit() {
+    if (fitDestroyed || !fit.isConnected) return;
+    const viewportWidth = app.clientWidth;
+    const viewportHeight = app.clientHeight;
+    if (viewportWidth <= 0 || viewportHeight <= 0) return;
+    const scale = Math.min(
+      1,
+      viewportWidth / PC_BATTLE_MIN_WIDTH,
+      viewportHeight / PC_BATTLE_MIN_HEIGHT,
+    );
+    fit.style.setProperty('--pc-battle-scale', String(scale));
+    fit.style.width = `${Math.ceil(viewportWidth / scale)}px`;
+    fit.style.height = `${Math.ceil(viewportHeight / scale)}px`;
+    fit.dataset.scale = scale.toFixed(4);
+    fit.classList.toggle('is-compact', scale < 0.75);
+  }
+
+  function destroyBattleFit() {
+    if (fitDestroyed) return;
+    fitDestroyed = true;
+    closeSeatStatsPanel(false);
+    const activeTip = document.getElementById('tip');
+    if (activeTip) {
+      activeTip.hidden = true;
+      activeTip.classList.remove('has-poker-stats');
+      activeTip.replaceChildren();
+    }
+    resizeObserver?.disconnect();
+    removalObserver?.disconnect();
+    if (fallbackResize) window.removeEventListener('resize', fallbackResize);
+  }
+
+  if (typeof ResizeObserver === 'function') {
+    resizeObserver = new ResizeObserver(updateBattleFit);
+    resizeObserver.observe(app);
+  } else {
+    fallbackResize = updateBattleFit;
+    window.addEventListener('resize', fallbackResize, { passive: true });
+  }
+  if (typeof MutationObserver === 'function') {
+    removalObserver = new MutationObserver(() => {
+      if (!fit.isConnected) destroyBattleFit();
+    });
+    removalObserver.observe(app, { childList: true });
+  }
+  updateBattleFit();
 
   const $ = (sel) => screen.querySelector(sel);
 
@@ -274,17 +421,195 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
 
   // ---- 技能提示浮层 ----
   const tip = document.getElementById('tip');
+
+  function seatPokerMetricNode(stats, definition, { mini = false, idx = 0 } = {}) {
+    const cell = document.createElement('div');
+    cell.className = `pc-seat-poker-metric${mini ? ' is-mini' : ''}${stats[definition.key] == null && definition.key !== 'hands' ? ' is-empty' : ''}`;
+    cell.dataset.testid = mini
+      ? `pc-seat-stats-mini-${seatPokerTestKey(definition.key)}-${idx}`
+      : `pc-seat-stats-${seatPokerTestKey(definition.key)}`;
+    const label = document.createElement('span');
+    label.className = 'pc-seat-poker-metric__label';
+    label.textContent = definition.label;
+    const value = document.createElement('strong');
+    value.textContent = seatPokerValue(stats, definition);
+    const name = document.createElement('span');
+    name.className = 'pc-seat-poker-metric__name';
+    name.textContent = definition.name;
+    cell.append(label, value, name);
+    if (!mini) {
+      const description = document.createElement('small');
+      description.textContent = definition.description;
+      cell.appendChild(description);
+    }
+    return cell;
+  }
+
+  function createSeatPokerMini(player, idx) {
+    const stats = normalizeSeatPokerStats(player.pokerStats);
+    const hud = document.createElement('section');
+    hud.className = `pc-seat-poker-mini${stats.available ? '' : ' is-empty'}`;
+    hud.dataset.testid = `pc-seat-stats-mini-${idx}`;
+    const head = document.createElement('div');
+    head.className = 'pc-seat-poker-mini__head';
+    const title = document.createElement('strong');
+    title.textContent = '扑克数据';
+    const confidence = document.createElement('span');
+    confidence.className = `is-${stats.confidence.tone}`;
+    confidence.textContent = stats.confidence.label;
+    head.append(title, confidence);
+    const grid = document.createElement('div');
+    grid.className = 'pc-seat-poker-mini__grid';
+    grid.append(...SEAT_POKER_CORE.map((definition) => seatPokerMetricNode(stats, definition, { mini: true, idx })));
+    const range = document.createElement('small');
+    range.textContent = `${stats.rangeLabel} · 点击头像查看详情`;
+    hud.append(head, grid, range);
+    return hud;
+  }
+
+  function closeSeatStatsPanel(restoreFocus = true) {
+    if (seatStatsKeyHandler) document.removeEventListener('keydown', seatStatsKeyHandler);
+    seatStatsKeyHandler = null;
+    seatStatsLayer?.remove();
+    seatStatsLayer = null;
+    if (seatStatsReturnFocus) seatStatsReturnFocus.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && seatStatsReturnFocus?.isConnected) seatStatsReturnFocus.focus();
+    seatStatsReturnFocus = null;
+  }
+
+  function openSeatStatsPanel(idx, returnFocus) {
+    closeSeatStatsPanel(false);
+    const player = players[idx];
+    const stats = normalizeSeatPokerStats(player?.pokerStats);
+    const layer = document.createElement('div');
+    layer.className = 'pc-seat-stats-layer';
+    layer.dataset.testid = 'pc-seat-stats-layer';
+    const panel = document.createElement('section');
+    panel.className = 'pc-seat-stats-panel';
+    panel.dataset.testid = 'pc-seat-stats-panel';
+    panel.dataset.seat = String(idx);
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-labelledby', 'pc-seat-stats-title');
+
+    const header = document.createElement('header');
+    header.className = 'pc-seat-stats-panel__header';
+    const heading = document.createElement('div');
+    const eyebrow = document.createElement('span');
+    eyebrow.className = 'pc-seat-stats-panel__eyebrow';
+    eyebrow.textContent = `SEAT ${idx} · POKER STATISTICS`;
+    const title = document.createElement('h2');
+    title.id = 'pc-seat-stats-title';
+    title.textContent = `${player?.playerName || player?.hero?.name || `${idx}号位`} · 扑克统计`;
+    const subtitle = document.createElement('p');
+    subtitle.textContent = `${player?.hero?.name || ''}${player?.shortId ? ` · #${player.shortId}` : ''} · ${stats.rangeLabel}`;
+    heading.append(eyebrow, title, subtitle);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'pc-seat-stats-panel__close';
+    close.dataset.testid = 'pc-seat-stats-close';
+    close.setAttribute('aria-label', '关闭扑克统计');
+    close.textContent = '×';
+    close.addEventListener('click', () => closeSeatStatsPanel());
+    header.append(heading, close);
+
+    const confidence = document.createElement('div');
+    confidence.className = 'pc-seat-stats-panel__confidence';
+    const confidenceText = document.createElement('div');
+    const confidenceLabel = document.createElement('strong');
+    confidenceLabel.textContent = stats.confidence.label;
+    const confidenceSample = document.createElement('span');
+    confidenceSample.textContent = stats.available ? `有效样本 ${stats.hands} 手` : '尚未形成可用统计样本';
+    confidenceText.append(confidenceLabel, confidenceSample);
+    const confidenceBar = document.createElement('div');
+    confidenceBar.className = 'pc-seat-stats-confidence-bar';
+    const confidenceFill = document.createElement('span');
+    confidenceFill.style.width = `${stats.confidence.value}%`;
+    confidenceBar.appendChild(confidenceFill);
+    confidence.append(confidenceText, confidenceBar);
+
+    const empty = document.createElement('div');
+    empty.className = 'pc-seat-stats-panel__empty';
+    empty.hidden = stats.available;
+    const emptyTitle = document.createElement('strong');
+    emptyTitle.textContent = player?.isHuman ? '暂无扑克统计' : 'AI 座位没有历史玩家样本';
+    const emptyText = document.createElement('span');
+    emptyText.textContent = player?.isHuman ? '完成足够的真人对局后会逐步形成统计。' : '本地 AI 仅执行当前牌局策略，不生成玩家画像。';
+    empty.append(emptyTitle, emptyText);
+
+    const makeSection = (sectionTitle, sectionMeta, definitions, className = '') => {
+      const section = document.createElement('section');
+      section.className = 'pc-seat-stats-panel__section';
+      const sectionHead = document.createElement('div');
+      sectionHead.className = 'pc-seat-stats-panel__section-title';
+      const h3 = document.createElement('h3');
+      h3.textContent = sectionTitle;
+      const meta = document.createElement('span');
+      meta.textContent = sectionMeta;
+      sectionHead.append(h3, meta);
+      const metrics = document.createElement('div');
+      metrics.className = `pc-seat-stats-panel__metrics${className}`;
+      metrics.append(...definitions.map((definition) => seatPokerMetricNode(stats, definition)));
+      section.append(sectionHead, metrics);
+      return section;
+    };
+
+    const footer = document.createElement('footer');
+    footer.className = 'pc-seat-stats-panel__footer';
+    const note = document.createElement('span');
+    note.textContent = '以上数字仅反映历史牌局，不会触发自动行动。';
+    const done = document.createElement('button');
+    done.type = 'button';
+    done.textContent = '关闭';
+    done.addEventListener('click', () => closeSeatStatsPanel());
+    footer.append(note, done);
+
+    panel.append(
+      header,
+      confidence,
+      empty,
+      makeSection('核心数据', '首屏 HUD 指标', SEAT_POKER_CORE, ' is-core'),
+      makeSection('摊牌与持续下注', '补充行为数据', SEAT_POKER_DETAIL),
+      footer,
+    );
+    layer.appendChild(panel);
+    layer.addEventListener('click', (event) => { if (event.target === layer) closeSeatStatsPanel(); });
+    seatStatsKeyHandler = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSeatStatsPanel();
+      }
+    };
+    document.addEventListener('keydown', seatStatsKeyHandler);
+    seatStatsLayer = layer;
+    seatStatsReturnFocus = returnFocus || null;
+    seatStatsReturnFocus?.setAttribute('aria-expanded', 'true');
+    tip.hidden = true;
+    screen.appendChild(layer);
+    queueMicrotask(() => close.focus());
+  }
+
   function showTip(idx, x, y) {
     const p = players[idx];
     const who = idx === myIdx ? '（你）' : p.playerName ? `（${p.playerName}）` : `（${idx}号位）`;
-    tip.innerHTML =
-      `<div class="st-title">${p.hero.name} · ${p.hero.type}${who}</div>` +
-      `<div class="st-active">主动【${p.hero.skillName}】${p.hero.skillCost}⚡ · 每回合限一次</div>` +
-      `<div>效果：${p.hero.skillDesc}</div>` +
-      `<div class="st-cond">发动条件：${p.hero.condDesc}（以两枚暗令判定）</div>` +
-      `<div class="st-passive">被动：${p.hero.passiveDesc}</div>`;
+    const lines = [
+      ['st-title', `${p.hero.name} · ${p.hero.type}${who}`],
+      ['st-active', `主动【${p.hero.skillName}】${p.hero.skillCost}⚡ · 每回合限一次`],
+      ['', `效果：${p.hero.skillDesc}`],
+      ['st-cond', `发动条件：${p.hero.condDesc}（以两枚暗令判定）`],
+      ['st-passive', `被动：${p.hero.passiveDesc}`],
+    ];
+    const content = lines.map(([className, text]) => {
+      const line = document.createElement('div');
+      line.className = className;
+      line.textContent = text;
+      return line;
+    });
+    content.push(createSeatPokerMini(p, idx));
+    tip.classList.add('has-poker-stats');
+    tip.replaceChildren(...content);
     tip.hidden = false;
-    const w = 236, hh = tip.offsetHeight || 150;
+    const w = tip.offsetWidth || 340, hh = tip.offsetHeight || 240;
     let tx = Math.max(6, Math.min(x - w / 2, window.innerWidth - w - 6));
     let ty = y > window.innerHeight / 2 ? y - hh - 12 : y + 12;
     tip.style.left = `${tx}px`;
@@ -296,6 +621,24 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     s.seat.addEventListener('click', (e) => {
       showTip(Number(idx), e.clientX, e.clientY);
       setTimeout(() => { tip.hidden = true; }, 3500);
+    });
+    s.portrait.setAttribute('aria-haspopup', 'dialog');
+    s.portrait.setAttribute('aria-expanded', 'false');
+    s.portrait.addEventListener('focus', () => {
+      const rect = s.portrait.getBoundingClientRect();
+      showTip(Number(idx), rect.left + rect.width / 2, rect.top + rect.height / 2);
+    });
+    s.portrait.addEventListener('blur', () => { if (!seatStatsLayer) tip.hidden = true; });
+    s.portrait.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openSeatStatsPanel(Number(idx), s.portrait);
+    });
+    s.portrait.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        event.stopPropagation();
+        openSeatStatsPanel(Number(idx), s.portrait);
+      }
     });
   }
 
@@ -364,13 +707,26 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       const actor = layer.actorIdx ? players[layer.actorIdx] : null;
       const ratioText = layer.wagerAmount > 0 && layer.amount > 0
         ? `${Math.round(layer.ratio * 100)}%池` : '';
-      const detail = layer.wagerAmount > 0
-        ? `<em>${actor?.hero?.name || ''}下注 ${layer.wagerAmount}${ratioText ? ` · ${ratioText}` : ''}</em>`
-        : '<em>本阶段暂无主动下注</em>';
-      return h(`<span class="pot-layer ${layer.kind || 'main'}">
-        <span class="pot-value"><small>${layer.label}</small><strong>${layer.amount}</strong></span>
-        ${layer.kind === 'reference' ? detail : ''}
-      </span>`);
+      const kind = ['main', 'side', 'pending', 'reference'].includes(layer.kind)
+        ? layer.kind : 'main';
+      const root = document.createElement('span');
+      root.className = `pot-layer ${kind}`;
+      const value = document.createElement('span');
+      value.className = 'pot-value';
+      const label = document.createElement('small');
+      label.textContent = String(layer.label || '当前血池');
+      const amount = document.createElement('strong');
+      amount.textContent = String(Number(layer.amount) || 0);
+      value.append(label, amount);
+      root.appendChild(value);
+      if (kind === 'reference') {
+        const detail = document.createElement('em');
+        detail.textContent = layer.wagerAmount > 0
+          ? `${actor?.hero?.name || ''}下注 ${layer.wagerAmount}${ratioText ? ` · ${ratioText}` : ''}`
+          : '本阶段暂无主动下注';
+        root.appendChild(detail);
+      }
+      return root;
     }));
   }
   function clearPot() {
@@ -582,11 +938,16 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
   // ---- 技能 ----
   function refreshSkillPanel() {
     const availability = engine.skillAvailability(myIdx);
-    skillBtn.disabled = !availability.ok;
+    const isMyAction = Number(engine.actingIdx) === Number(myIdx)
+      && Number(engine.waitingIdx) === Number(myIdx);
+    const ready = availability.ok && isMyAction && awaiting;
+    skillBtn.disabled = !ready;
     const cost = availability.cost ?? me.hero.skillCost;
     skillBtn.textContent = `${me.hero.skillName}（${cost}⚡）`;
-    skillState.textContent = availability.reason || '';
-    skillState.classList.toggle('ok', availability.ok);
+    skillState.textContent = ready
+      ? availability.reason || '条件已满足，可以发动'
+      : !isMyAction ? '仅可在轮到你行动时发动' : availability.reason || '';
+    skillState.classList.toggle('ok', ready);
   }
 
   function openSkillChoice(input) {
@@ -604,6 +965,14 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     const renderField = (index) => {
       const field = fields[index];
       if (!field) {
+        if (!awaiting
+          || Number(engine.waitingIdx) !== Number(myIdx)
+          || Number(engine.actingIdx) !== Number(myIdx)
+          || !engine.canUseSkill(myIdx)) {
+          mask.remove();
+          refreshSkillPanel();
+          return;
+        }
         mask.remove();
         engine.useSkill(myIdx, selection);
         return;
@@ -630,7 +999,10 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
   }
 
   skillBtn.addEventListener('click', () => {
-    if (!engine.canUseSkill(myIdx)) return;
+    if (!awaiting
+      || Number(engine.waitingIdx) !== Number(myIdx)
+      || Number(engine.actingIdx) !== Number(myIdx)
+      || !engine.canUseSkill(myIdx)) return;
     const input = engine.getSkillPrompt(myIdx);
     if (input && input.fields?.length) openSkillChoice(input);
     else engine.useSkill(myIdx);
@@ -687,6 +1059,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
   listeners.onTurnStart = (idx) => {
     highlightTurn(idx);
     showTurnBar(idx);
+    refreshSkillPanel();
   };
   listeners.onAwaitAction = (idx, opts, remain) => {
     lastOpts = opts;
@@ -714,6 +1087,8 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       playSFX('draw');
     }
     if (idx === myIdx) hideActionUI();
+    screen.querySelector('.skill-choice-mask')?.remove();
+    refreshSkillPanel();
   };
   listeners.onStreet = (street, revealTo) => {
     for (let slot = 1; slot <= revealTo; slot++) {
@@ -724,6 +1099,7 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
       }
     }
     clearActionHints();
+    screen.querySelector('.skill-choice-mask')?.remove();
     updatePot();
     peekEl.textContent = '';
     refreshAdvice();
@@ -881,9 +1257,11 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
     setStatus(idx, '', '');
   };
   listeners.onRoundEnd = () => {
+    screen.querySelector('.skill-choice-mask')?.remove();
     for (const [iStr, s] of Object.entries(seats)) {
       if (players[Number(iStr)].alive) s.seat.classList.remove('folded');
     }
+    refreshSkillPanel();
   };
   listeners.onGameOver = (ranking) => {
     hideActionUI();
@@ -929,5 +1307,6 @@ export function attachBattle(engine, listeners, myIdx, onGameOver) {
         f.classList.toggle('low', pct <= 0.25);
       }
     },
+    destroy: destroyBattleFit,
   };
 }

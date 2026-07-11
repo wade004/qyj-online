@@ -52,6 +52,7 @@ export class Engine {
         betRound: 0,
         acted: false,
         lastActionBet: 0,
+        lastAction: null,
         skillUsed: false,
         skillStatuses: [],
         passiveUsed: Object.create(null),
@@ -86,6 +87,7 @@ export class Engine {
     this.minRaiseInc = 0;
     this.streetRaiseCount = 0;
     this.actingIdx = 0;
+    this.actionCursorIdx = 0;
     this.waitingIdx = null;
     this.streetHadRaise = false;
     this.allInHandsRevealed = false;
@@ -248,6 +250,10 @@ export class Engine {
     this.round++;
     const blinds = Config.getBlinds(this.round);
 
+    this.actingIdx = 0;
+    this.actionCursorIdx = 0;
+    this.waitingIdx = null;
+
     this.deck = newShuffledDeck();
     this.board = [];
     for (let i = 0; i < 5; i++) this.board.push(draw(this.deck));
@@ -267,6 +273,7 @@ export class Engine {
       p.betRound = 0;
       p.acted = false;
       p.lastActionBet = 0;
+      p.lastAction = null;
       resetRoundSkillState(p);
       p.showdownInfo = null;
     }
@@ -293,15 +300,21 @@ export class Engine {
     const sbIdx = headsUp ? this.dealerIdx : this.nextIdx(this.dealerIdx);
     const bbIdx = sbIdx ? this.nextIdx(sbIdx) : null;
     if (!sbIdx || !bbIdx) return;
-    this.commit(this.players[sbIdx], Math.min(blinds.sb, this.players[sbIdx].hp));
-    this.commit(this.players[bbIdx], Math.min(blinds.bb, this.players[bbIdx].hp));
+    const sbPaid = this.commit(this.players[sbIdx], Math.min(blinds.sb, this.players[sbIdx].hp));
+    const bbPaid = this.commit(this.players[bbIdx], Math.min(blinds.bb, this.players[bbIdx].hp));
+    this.players[sbIdx].lastAction = {
+      key: 'smallBlind', amount: sbPaid, street: this.street, round: this.round,
+    };
+    this.players[bbIdx].lastAction = {
+      key: 'bigBlind', amount: bbPaid, street: this.street, round: this.round,
+    };
     this.currentBet = blinds.bb;
     this.minRaiseInc = blinds.bb;
     this.streetRaiseCount = 0;
     this.emit('onBlindsPosted', sbIdx, blinds.sb, bbIdx, blinds.bb);
     this.log(`${this.players[sbIdx].hero.name} 献祭 ${blinds.sb}，${this.players[bbIdx].hero.name} 献祭 ${blinds.bb}`, 'info');
 
-    this.actingIdx = bbIdx;
+    this.actionCursorIdx = bbIdx;
     this.delay(1.4, () => this.proceedAction());
   }
 
@@ -333,12 +346,12 @@ export class Engine {
       this.advanceStreet();
       return;
     }
-    const nextActor = this.nextIdx(this.actingIdx, needsAct);
+    const nextActor = this.nextIdx(this.actionCursorIdx, needsAct);
     if (!nextActor) {
       this.advanceStreet();
       return;
     }
-    this.actingIdx = nextActor;
+    this.actionCursorIdx = nextActor;
     this.requestAction(this.players[nextActor]);
   }
 
@@ -370,6 +383,7 @@ export class Engine {
   }
 
   requestAction(p) {
+    this.actingIdx = p.idx;
     this.emit('onTurnStart', p.idx);
     if (p.isHuman) {
       this.waitingIdx = p.idx;
@@ -377,6 +391,7 @@ export class Engine {
     } else {
       this.delay(0.9 + Math.random() * 1.1, () => {
         if (this.gameOver || p.folded || !p.alive) {
+          this.actingIdx = 0;
           this.proceedAction();
           return;
         }
@@ -397,26 +412,56 @@ export class Engine {
 
   applyAction(p, act) {
     if (this.gameOver) return;
+    this.actionCursorIdx = p.idx;
     const name = p.hero.name;
     const potBeforeAction = this.totalPot();
+    const publicActionContext = {
+      round: this.round,
+      street: this.street,
+      type: act.type,
+      currentBetBefore: this.currentBet,
+      betStreetBefore: p.betStreet,
+      toCallBefore: Math.max(0, this.currentBet - p.betStreet),
+      streetRaiseCountBefore: this.streetRaiseCount,
+      potBefore: potBeforeAction,
+    };
+    const emitAction = (key, amount, isAggressive = false) => {
+      p.lastAction = {
+        key,
+        amount: Number(amount) || 0,
+        street: this.street,
+        round: this.round,
+      };
+      // The action event snapshot represents a completed action. Keep the
+      // private rotation cursor separately so reconnects never report the
+      // previous player as still acting.
+      this.actingIdx = 0;
+      this.emit(
+        'onAction',
+        p.idx,
+        key,
+        amount,
+        { ...publicActionContext, isAggressive },
+      );
+    };
     let actionGroup = 'defend';
     if (act.type === 'fold') {
       actionGroup = 'fold';
       p.folded = true;
       p.acted = true;
       p.lastActionBet = this.currentBet;
-      this.emit('onAction', p.idx, 'fold', 0);
+      emitAction('fold', 0);
       this.log(`${name} 退避`, 'fold');
     } else if (act.type === 'check') {
       p.acted = true;
       p.lastActionBet = this.currentBet;
-      this.emit('onAction', p.idx, 'check', 0);
+      emitAction('check', 0);
       this.log(`${name} 静观`, 'info');
     } else if (act.type === 'call') {
       const pay = this.commit(p, Math.max(0, this.currentBet - p.betStreet));
       p.acted = true;
       p.lastActionBet = this.currentBet;
-      this.emit('onAction', p.idx, 'call', pay);
+      emitAction('call', pay);
       this.log(`${name} 应战 ${pay}`, 'info');
     } else if (act.type === 'raise') {
       actionGroup = 'attack';
@@ -439,7 +484,7 @@ export class Engine {
         potBefore: potBeforeAction,
         ratio: potBeforeAction > 0 ? pay / potBeforeAction : 0,
       };
-      this.emit('onAction', p.idx, tier.key, pay);
+      emitAction(tier.key, pay, true);
       this.log(`${name} ${tier.name}！灌注 ${pay}`, 'raise');
     } else if (act.type === 'allin') {
       const raisesCurrentBet = p.betStreet + p.hp > this.currentBet;
@@ -471,7 +516,7 @@ export class Engine {
           ratio: potBeforeAction > 0 ? pay / potBeforeAction : 0,
         };
       }
-      this.emit('onAction', p.idx, 'allin', pay);
+      emitAction('allin', pay, raisesCurrentBet);
       this.emit('onQuote', p.idx, p.hero.lines.allin);
       this.log(`${name} 决死！押上全部 ${pay} 气血！`, 'allin');
     }
@@ -496,6 +541,9 @@ export class Engine {
   }
 
   advanceStreet() {
+    this.actingIdx = 0;
+    this.actionCursorIdx = 0;
+    this.waitingIdx = null;
     this.revealAllInHandsIfClosed();
     if (this.street !== 'river') {
       dispatchSkillEvent(this, 'STREET_ADVANCE', {
@@ -503,9 +551,11 @@ export class Engine {
       });
     }
     for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
-      this.players[i].betStreet = 0;
-      this.players[i].acted = false;
-      this.players[i].lastActionBet = 0;
+      const player = this.players[i];
+      player.betStreet = 0;
+      player.acted = false;
+      player.lastActionBet = 0;
+      if (!player.folded && !player.allIn) player.lastAction = null;
     }
     this.currentBet = 0;
     this.minRaiseInc = Config.getBlinds(this.round).bb;
@@ -543,7 +593,7 @@ export class Engine {
       this.delay(1.6, () => this.advanceStreet());
       return;
     }
-    this.actingIdx = this.dealerIdx;
+    this.actionCursorIdx = this.dealerIdx;
     this.delay(1.5, () => this.proceedAction());
   }
 
@@ -560,8 +610,17 @@ export class Engine {
   // ---------------- 夺池 / 亮招结算 ----------------
 
   awardUncontested(p) {
+    this.actingIdx = 0;
+    this.actionCursorIdx = 0;
+    this.waitingIdx = null;
     const pot = this.totalPot();
-    const netWinnings = { [p.idx]: pot - p.betRound };
+    const netWinnings = {};
+    for (const player of this.players.slice(1)) {
+      const contribution = Math.max(0, Number(player.betRound) || 0);
+      if (contribution > 0 || player.idx === p.idx) {
+        netWinnings[player.idx] = (player.idx === p.idx ? pot : 0) - contribution;
+      }
+    }
     p.hp += pot;
     this.emit('onHpChange', p.idx);
     dispatchSkillEvent(this, 'UNCONTESTED_WIN', { winner: p });
@@ -572,6 +631,9 @@ export class Engine {
   }
 
   showdown() {
+    this.actingIdx = 0;
+    this.actionCursorIdx = 0;
+    this.waitingIdx = null;
     if (this.revealed < 5) {
       this.revealed = 5;
       this.emit('onStreet', 'river', 5);
@@ -659,7 +721,11 @@ export class Engine {
     dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'showdown', winnerIds: winnersAll });
 
     const netResult = {};
-    for (const p of entrants) netResult[p.idx] = (wonAmount[p.idx] || 0) - p.betRound;
+    for (const p of this.players.slice(1)) {
+      const contribution = Math.max(0, Number(p.betRound) || 0);
+      const award = Math.max(0, Number(wonAmount[p.idx]) || 0);
+      if (contribution > 0 || award > 0) netResult[p.idx] = award - contribution;
+    }
 
     this.emit('onShowdown', {
       entrants,
@@ -736,6 +802,9 @@ export class Engine {
 
   endRound() {
     if (this.gameOver) return;
+    this.actingIdx = 0;
+    this.actionCursorIdx = 0;
+    this.waitingIdx = null;
     dispatchSkillEvent(this, 'ROUND_END', { round: this.round });
     for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
       const p = this.players[i];
@@ -762,6 +831,8 @@ export class Engine {
   doGameOver() {
     if (this.gameOver) return;
     this.gameOver = true;
+    this.actingIdx = 0;
+    this.actionCursorIdx = 0;
     this.waitingIdx = null;
     const ranking = this.players.slice(1);
     ranking.sort((a, b) => {

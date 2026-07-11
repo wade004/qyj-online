@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 1,
+  "description": "Runtime allowlist for the current web client. Source/reference assets are intentionally excluded.",
+  "entrypoints": [
+    "index.html",
+    "h5.html"
+  ],
+  "runtime": {
+    "images": {
+      "backgrounds": [
+        "assets/bg/gaming_bg.jpg",
+        "assets/theme/cardback.png"
+      ],
+      "heroes": [
+        "assets/characters/zhuge_liang.png",
+        "assets/characters/diao_chan.png",
+        "assets/characters/han_xin.png",
+        "assets/characters/xiang_yu.png",
+        "assets/characters/lv_buwei.png",
+        "assets/characters/lian_po.png",
+        "assets/characters/wuzetian.png",
+        "assets/characters/hua_mulan.png",
+        "assets/characters/xi_shi.png",
+        "assets/characters/wang_zhaojun.png",
+        "assets/characters/shangguan_waner.png",
+        "assets/characters/li_qingzhao.png",
+        "assets/characters/fu_hao.png",
+        "assets/characters/mu_guiying.png",
+        "assets/characters/nv_wa.png",
+        "assets/characters/chang_e.png"
+      ],
+      "h5Backgrounds": [
+        "assets/h5/backgrounds/gaming_bg_1280.webp"
+      ],
+      "h5Theme": [
+        "assets/theme/seat_frame.png"
+      ],
+      "h5Cards": [
+        "assets/h5/cards/cardback.webp",
+        "assets/h5/cards/rank_02.webp",
+        "assets/h5/cards/rank_03.webp",
+        "assets/h5/cards/rank_04.webp",
+        "assets/h5/cards/rank_05.webp",
+        "assets/h5/cards/rank_06.webp",
+        "assets/h5/cards/rank_07.webp",
+        "assets/h5/cards/rank_08.webp",
+        "assets/h5/cards/rank_09.webp",
+        "assets/h5/cards/rank_10.webp",
+        "assets/h5/cards/rank_J.webp",
+        "assets/h5/cards/rank_Q.webp",
+        "assets/h5/cards/rank_K.webp",
+        "assets/h5/cards/rank_A.webp"
+      ],
+      "h5Heroes": [
+        "assets/h5/heroes/zhuge_liang_320.webp",
+        "assets/h5/heroes/zhuge_liang_640.webp",
+        "assets/h5/heroes/diao_chan_320.webp",
+        "assets/h5/heroes/diao_chan_640.webp",
+        "assets/h5/heroes/han_xin_320.webp",
+        "assets/h5/heroes/han_xin_640.webp",
+        "assets/h5/heroes/xiang_yu_320.webp",
+        "assets/h5/heroes/xiang_yu_640.webp",
+        "assets/h5/heroes/lv_buwei_320.webp",
+        "assets/h5/heroes/lv_buwei_640.webp",
+        "assets/h5/heroes/lian_po_320.webp",
+        "assets/h5/heroes/lian_po_640.webp",
+        "assets/h5/heroes/wuzetian_320.webp",
+        "assets/h5/heroes/wuzetian_640.webp",
+        "assets/h5/heroes/hua_mulan_320.webp",
+        "assets/h5/heroes/hua_mulan_640.webp",
+        "assets/h5/heroes/xi_shi_320.webp",
+        "assets/h5/heroes/xi_shi_640.webp",
+        "assets/h5/heroes/wang_zhaojun_320.webp",
+        "assets/h5/heroes/wang_zhaojun_640.webp",
+        "assets/h5/heroes/shangguan_waner_320.webp",
+        "assets/h5/heroes/shangguan_waner_640.webp",
+        "assets/h5/heroes/li_qingzhao_320.webp",
+        "assets/h5/heroes/li_qingzhao_640.webp",
+        "assets/h5/heroes/fu_hao_320.webp",
+        "assets/h5/heroes/fu_hao_640.webp",
+        "assets/h5/heroes/mu_guiying_320.webp",
+        "assets/h5/heroes/mu_guiying_640.webp",
+        "assets/h5/heroes/nv_wa_320.webp",
+        "assets/h5/heroes/nv_wa_640.webp",
+        "assets/h5/heroes/chang_e_320.webp",
+        "assets/h5/heroes/chang_e_640.webp"
+      ],
+      "cardRanks": [
+        "assets/rankb_02_20260705150419.png",
+        "assets/rankb_03_20260705150419.png",
+        "assets/rankb_04_20260705150419.png",
+        "assets/rankb_05_20260705150419.png",
+        "assets/rankb_06_20260705150419.png",
+        "assets/rankb_07_20260705150845.png",
+        "assets/rankb_08_20260705150845.png",
+        "assets/rankb_09_20260705150845.png",
+        "assets/rankb_10_20260705150845.png",
+        "assets/rankc_J_20260705154216.png",
+        "assets/rankc_Q_20260705154216.png",
+        "assets/rankc_K_20260705154216.png",
+        "assets/rankc_A_20260705154216.png"
+      ],
+      "cardSuits": [
+        "assets/card/lukai_spade.png",
+        "assets/card/lukai_heart.png",
+        "assets/card/lukai_diamond.png",
+        "assets/card/lukai_club.png"
+      ]
+    },
+    "audio": {
+      "bgmTracks": [
+        "assets/audio/bgm/music_default.mp3",
+        "assets/audio/bgm/music_danji.mp3",
+        "assets/audio/bgm/music_jifeng.mp3",
+        "assets/audio/bgm/aozhan_online.mp3"
+      ],
+      "sfx": {
+        "draw": "assets/audio/effect/draw.mp3",
+        "drawx": "assets/audio/effect/drawx.mp3",
+        "discard": "assets/audio/effect/discard.mp3",
+        "damage": "assets/audio/effect/damage.mp3",
+        "damageMale": "assets/audio/effect/damage_male.mp3",
+        "damageFemale": "assets/audio/effect/damage_female.mp3",
+        "die": "assets/audio/effect/die_male.mp3",
+        "dieFemale": "assets/audio/effect/die_female.mp3",
+        "recover": "assets/audio/effect/recover.mp3",
+        "judge": "assets/audio/effect/judge.mp3",
+        "link": "assets/audio/effect/link.mp3",
+        "equip": "assets/audio/effect/equip1.mp3",
+        "equip1": "assets/audio/effect/equip1.mp3",
+        "equip2": "assets/audio/effect/equip2.mp3",
+        "win": "assets/audio/effect/win.mp3",
+        "lose": "assets/audio/effect/lose.mp3"
+      },
+      "sfxAliases": {
+        "equip": "equip1"
+      }
+    }
+  },
+  "formatPolicy": {
+    "knownMismatchAction": "warn",
+    "unexpectedMismatchAction": "error",
+    "knownExtensionMismatches": {
+      "assets/characters/zhuge_liang.png": "jpeg",
+      "assets/characters/diao_chan.png": "jpeg",
+      "assets/characters/han_xin.png": "jpeg",
+      "assets/characters/xiang_yu.png": "jpeg",
+      "assets/characters/lv_buwei.png": "jpeg",
+      "assets/characters/lian_po.png": "jpeg",
+      "assets/theme/cardback.png": "jpeg",
+      "assets/theme/seat_frame.png": "jpeg"
+    }
+  }
+}

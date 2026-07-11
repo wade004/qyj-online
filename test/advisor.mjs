@@ -38,6 +38,16 @@ try {
   premium.hole = [C(14, 1), C(14, 2)];
   const premiumOpts = premiumEngine.getOptions(premium);
   const premiumAdvice = Advisor.analyzeDecision(premiumEngine, premium, premiumOpts);
+  const nullOverrideAdvice = Advisor.analyzeDecision(
+    premiumEngine, premium, premiumOpts, { equity: null },
+  );
+  const zeroOverrideAdvice = Advisor.analyzeDecision(
+    premiumEngine, premium, premiumOpts, { equity: 0 },
+  );
+  assert(nullOverrideAdvice.equity === premiumAdvice.equity,
+    'null 权益不得被误判为 0，必须回退到正常估算');
+  assert(zeroOverrideAdvice.equity === 0,
+    '显式传入的 0 权益必须保留');
   assert(['raise', 'allin'].includes(premiumAdvice.action.type), 'AA翻前应建议主动进攻');
   assert(premiumAdvice.reason.length >= 20 && premiumAdvice.metrics.includes('BB'),
     '建议必须提供范围/筹码理由和定量指标');

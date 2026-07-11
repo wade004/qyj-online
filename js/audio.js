@@ -6,15 +6,15 @@ const AUDIO_BASE = 'assets/audio';
 const MUTE_STORAGE_KEY = 'qyj.masterMuted';
 
 // BGM 音轨池
-const BGM_TRACKS = [
+export const BGM_TRACKS = Object.freeze([
   `${AUDIO_BASE}/bgm/music_default.mp3`,
   `${AUDIO_BASE}/bgm/music_danji.mp3`,
   `${AUDIO_BASE}/bgm/music_jifeng.mp3`,
   `${AUDIO_BASE}/bgm/aozhan_online.mp3`,
-];
+]);
 
 // 音效映射
-const SFX = {
+export const SFX = Object.freeze({
   draw: `${AUDIO_BASE}/effect/draw.mp3`,
   drawx: `${AUDIO_BASE}/effect/drawx.mp3`,
   discard: `${AUDIO_BASE}/effect/discard.mp3`,
@@ -25,10 +25,15 @@ const SFX = {
   dieFemale: `${AUDIO_BASE}/effect/die_female.mp3`,
   recover: `${AUDIO_BASE}/effect/recover.mp3`,
   judge: `${AUDIO_BASE}/effect/judge.mp3`,
+  link: `${AUDIO_BASE}/effect/link.mp3`,
+  // `equip` is kept for existing battle call sites; skill presentations use
+  // the explicit equip1/equip2 keys.
   equip: `${AUDIO_BASE}/effect/equip1.mp3`,
+  equip1: `${AUDIO_BASE}/effect/equip1.mp3`,
+  equip2: `${AUDIO_BASE}/effect/equip2.mp3`,
   win: `${AUDIO_BASE}/effect/win.mp3`,
   lose: `${AUDIO_BASE}/effect/lose.mp3`,
-};
+});
 
 let bgmAudio = null;
 let masterMuted = false;
