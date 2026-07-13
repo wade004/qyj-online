@@ -3,7 +3,12 @@
 // 数值来源：《群英决》策划案 V1.3 · 第十章 数值总表
 // ============================================================================
 
-export const PLAYER_COUNT = 6;
+export const DEFAULT_TABLE_SIZE = 6;
+export const SUPPORTED_TABLE_SIZES = Object.freeze([6, 9]);
+export const MAX_TABLE_SIZE = 9;
+// Backward-compatible name for local/single-player callers. Runtime engines
+// use their own `tableSize` so six-seat and nine-seat games can coexist.
+export const PLAYER_COUNT = DEFAULT_TABLE_SIZE;
 export const MAX_ROUNDS = 12;
 export const INIT_HP = 1500;
 export const INIT_ENERGY = 2;

@@ -370,7 +370,8 @@ function resolveSelection(engine, skill, player, selection) {
     if (options.some((option) => option.value === requested)) {
       resolved[field.key] = requested;
     } else if (!player.isHuman && options.length) {
-      resolved[field.key] = options[Math.floor(Math.random() * options.length)].value;
+      const rng = typeof engine.rng === 'function' ? engine.rng : Math.random;
+      resolved[field.key] = options[Math.floor(rng() * options.length)].value;
     } else {
       return undefined;
     }
@@ -409,8 +410,9 @@ function applyEffect(engine, player, effect, context) {
     case 'PEEK_RANDOM_HOLE': {
       const targets = engine.activePlayers().filter((other) => other.idx !== player.idx);
       if (!targets.length) return null;
-      const target = targets[Math.floor(Math.random() * targets.length)];
-      const cardIdx = 1 + Math.floor(Math.random() * 2);
+      const rng = typeof engine.rng === 'function' ? engine.rng : Math.random;
+      const target = targets[Math.floor(rng() * targets.length)];
+      const cardIdx = 1 + Math.floor(rng() * 2);
       const card = target.hole[cardIdx - 1];
       engine.emit('onSkillResult', player.idx, {
         kind: 'peek_hole', targetIdx: target.idx, cardIdx, card,

@@ -4,6 +4,11 @@ test-results/
 playwright-report/
 .playwright/
 logs/
+reports/
+training/checkpoints/
+training/artifacts/
+training/datasets/
+training/profiles/
 .DS_Store
 server/data/*.sqlite
 server/data/*.sqlite-*

@@ -5,8 +5,19 @@ function isLandscape() {
     ?? window.innerWidth > window.innerHeight;
 }
 
+function isTextEntry(element = document.activeElement) {
+  return element instanceof HTMLInputElement
+    || element instanceof HTMLTextAreaElement
+    || element?.isContentEditable === true;
+}
+
 function isLargeEnough() {
-  return window.innerWidth >= 568 && window.innerHeight >= 320;
+  if (window.innerWidth < 568) return false;
+  if (window.innerHeight >= 320) return true;
+  // Mobile keyboards can shrink the landscape visual viewport below the
+  // gameplay minimum while the user is filling an account form. Keep the
+  // current landscape screen interactive until the input loses focus.
+  return isLandscape() && isTextEntry() && window.innerHeight >= 180;
 }
 
 export function mountOrientationGate({ stage, gateRoot, onStarted, isOnlineBattle = () => false }) {
@@ -86,7 +97,10 @@ export function mountOrientationGate({ stage, gateRoot, onStarted, isOnlineBattl
     listen(window, 'resize', update),
     listen(window, 'orientationchange', update),
     listen(document, 'fullscreenchange', update),
+    listen(document, 'focusin', update),
+    listen(document, 'focusout', () => setTimeout(update, 0)),
   ];
+  if (window.visualViewport) cleanups.push(listen(window.visualViewport, 'resize', update));
   update();
 
   return {

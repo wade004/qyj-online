@@ -1,7 +1,7 @@
 import * as Config from '../../game/config.js';
 import * as Advisor from '../../game/advisor.js';
 import { cardText } from '../../game/engine.js';
-import { describe } from '../../game/handeval.js';
+import { describe, isPlayerMadeStrongHand } from '../../game/handeval.js';
 import { playSFX } from '../../audio.js';
 import {
   H5_CARD_BACK,
@@ -21,19 +21,88 @@ const STREET_FEEDBACK_LABELS = Object.freeze({
 });
 
 const cardSignature = (card) => `${card?.rank || 0}:${card?.suit || 0}`;
+const UNIFIED_SKILL_GLYPH = '技';
+const heroSkillTooltip = (hero) => {
+  const active = hero?.skills?.active;
+  const passive = hero?.skills?.passive;
+  return [
+    `主动【${active?.name || hero?.skillName || '未知'}】${active?.cost ?? hero?.skillCost ?? 0}⚡`,
+    active?.description || hero?.skillDesc || '',
+    `条件：${active?.conditionDescription || hero?.condDesc || '满足技能发动条件'}`,
+    `被动【${passive?.name || '未知'}】${passive?.description || hero?.passiveDesc || ''}`,
+  ].filter(Boolean).join(' · ');
+};
+const h5HandEffectTier = (category) => (
+  category >= 7 ? 'legendary' : category >= 4 ? 'strong' : 'made'
+);
 
-export function classifyH5HandHit(previousCategory, current, hole = [], street = '') {
+/**
+ * A displayed two-pair is only a personal major hand when both distinct hole
+ * cards belong to the evaluated pair cores. This excludes a board pair plus
+ * one matched hole card, a pocket pair plus a board pair, and two pair already
+ * present on the board. Categories above two pair keep the established major
+ * hand threshold; the transient hit notice still requires a hole-card core.
+ */
+export const isH5StrongMadeHand = isPlayerMadeStrongHand;
+
+export function classifyH5PremiumStartingHand(hole = []) {
+  if (!Array.isArray(hole) || hole.length < 2) return null;
+  const [first, second] = hole;
+  const high = Math.max(Number(first?.rank) || 0, Number(second?.rank) || 0);
+  const low = Math.min(Number(first?.rank) || 0, Number(second?.rank) || 0);
+  const pair = high === low;
+  const suited = Number(first?.suit) === Number(second?.suit);
+  const premium = (pair && high >= 10)
+    || (high === 14 && low >= 12)
+    || (suited && ((high === 14 && low === 11) || (high === 13 && low === 12)));
+  if (!premium) return null;
+  const rankLabel = (rank) => ({ 14: 'A', 13: 'K', 12: 'Q', 11: 'J', 10: 'T' })[rank] || String(rank);
+  return {
+    category: 1,
+    stage: '天时',
+    name: '强力起手',
+    poker: pair ? `${rankLabel(high)}${rankLabel(low)}` : `${rankLabel(high)}${rankLabel(low)}${suited ? 's' : 'o'}`,
+    tier: 'premium',
+    strong: true,
+  };
+}
+
+function requestH5StrongHandVibration(tier = 'strong') {
+  if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') return false;
+  const pattern = tier === 'legendary' ? [90, 45, 140]
+    : tier === 'strong' ? [70, 40, 110]
+      : tier === 'premium' ? [55, 35, 90]
+        : [55, 35, 85];
+  try {
+    return navigator.vibrate(pattern);
+  } catch {
+    return false;
+  }
+}
+
+export function classifyH5HandHit(
+  previousCategory,
+  current,
+  hole = [],
+  street = '',
+  previousStrong = false,
+) {
   if (!current || !Number.isFinite(current.cat) || !Number.isFinite(previousCategory)) return null;
-  if (current.cat < 2 || current.cat <= previousCategory) return null;
+  const strong = isH5StrongMadeHand(current, hole);
+  const categoryImproved = current.cat > previousCategory;
+  const enteredStrong = strong && !previousStrong;
+  if (current.cat < 2 || (!categoryImproved && !enteredStrong)) return null;
   const holeCards = new Set(hole.map(cardSignature));
   const usesHole = (current.core || []).some((card) => holeCards.has(cardSignature(card)));
   if (!usesHole) return null;
+  if (current.cat === 3 && !strong) return null;
   return {
     category: current.cat,
     stage: STREET_FEEDBACK_LABELS[street] || '天机',
     name: current.name,
     poker: current.poker,
-    tier: current.cat >= 7 ? 'legendary' : current.cat >= 4 ? 'strong' : 'made',
+    tier: h5HandEffectTier(current.cat),
+    strong,
   };
 }
 
@@ -184,7 +253,7 @@ function makeCard(className, slotName = '') {
     setCard(card) {
       if (!card) return this.faceDown(slotName);
       const info = Config.SUITS[card.suit];
-      const faceImage = H5_CARD_FACES[card.rank] || Config.RANK_FACE_IMGS[card.rank];
+      const faceImage = H5_CARD_FACES[card.rank];
       const suitImage = Config.SUIT_IMGS[card.suit];
       root.style.backgroundImage = faceImage ? `url("${faceImage}")` : '';
       if (suitImage) suit.src = suitImage;
@@ -258,10 +327,11 @@ export function classifyH5SeatStatus(player, {
   return { state: 'idle', label: '尚未行动' };
 }
 
-export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = false }) {
+export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
   const engine = battle;
   const listeners = battle.listeners || {};
   const players = engine.players;
+  const playerCount = Math.max(1, Number(engine.tableSize) || players.length - 1);
   const me = players[myIdx];
   const previousListeners = new Map();
   let destroyed = false;
@@ -271,7 +341,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   let timeLeft = 0;
   let timerTotal = Config.ACTION_TIME;
   let observedTurnClock = null;
-  let localTurnClockSeq = 0;
+  let turnClockSequence = 0;
   let turnIdx = null;
   let actionPhaseStarted = false;
   let skillElapsed = 0;
@@ -284,7 +354,9 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   let strengthCache = null;
   let strengthPauseLabel = '';
   let lastHandCategory = null;
+  let lastStrongHandActive = false;
   let lastHandHitAt = 0;
+  let lastStrongHandVibrationKey = '';
   let handHitTimer = null;
   let handCoreTimer = null;
   let roundResultTimer = null;
@@ -298,7 +370,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
 
   const roundText = element('span', { className: 'h5-battle__round', text: `第 1/${Config.MAX_ROUNDS} 回合` });
   const blindText = element('span', { className: 'h5-battle__blind', text: '血祭 10/20' });
-  const networkText = element('span', { className: 'h5-battle__network', text: online ? '● 联机' : '● 单机' });
+  const networkText = element('span', { className: 'h5-battle__network', text: '● 联网' });
   const logButton = button('战报', { className: 'h5-icon-button', attrs: { 'data-testid': 'h5-open-log' } });
   const advisorToggle = element('input', {
     attrs: {
@@ -397,42 +469,114 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   });
 
   const seatMap = new Map();
+  const publicHoleCards = new Map();
   const statusNodes = new Map();
   const seatActions = new Map();
-  const opponents = element('div', { className: 'h5-opponents' });
+  const opponents = element('div', {
+    className: 'h5-opponents',
+    attrs: { 'data-player-count': String(playerCount) },
+  });
+  const skillHoverPreview = element('aside', {
+    className: 'h5-seat-skill-preview',
+    attrs: {
+      hidden: true,
+      role: 'tooltip',
+      'data-testid': 'h5-seat-skill-preview',
+      'aria-live': 'polite',
+    },
+  });
   const relativeSeats = [];
-  for (let offset = 1; offset <= Config.PLAYER_COUNT - 1; offset++) {
-    const idx = ((myIdx - 1 + offset) % Config.PLAYER_COUNT) + 1;
+  for (let offset = 1; offset <= playerCount - 1; offset++) {
+    const idx = ((myIdx - 1 + offset) % playerCount) + 1;
     relativeSeats.push(idx);
     const player = players[idx];
-    const portrait = element('span', { className: 'h5-seat__portrait', attrs: { 'aria-hidden': 'true' } });
+    const portrait = element('span', {
+      className: 'h5-seat__portrait',
+      attrs: { 'aria-hidden': 'true', 'data-testid': `h5-seat-portrait-${idx}` },
+    });
     portrait.style.backgroundImage = `url("${h5HeroPortrait(player.hero, 'thumb')}")`;
     const heroName = element('span', { className: 'h5-seat__hero-name', text: player.hero.name });
     const hpFill = element('span', { className: 'h5-seat__hp-fill' });
     const hpText = element('span', { className: 'h5-seat__hp-text', text: player.hp });
-    const energy = element('span', { className: 'h5-seat__energy', text: `⚡${player.energy}` });
+    const energy = element('span', {
+      className: 'h5-seat__energy',
+      text: String(player.energy),
+      attrs: {
+        'data-testid': `h5-seat-energy-${idx}`,
+        'aria-hidden': 'true',
+      },
+    });
     const actionStatus = makePlayerStatus(
       'h5-seat__action h5-player-status',
       `h5-seat-status-${idx}`,
     );
     const action = actionStatus.root;
-    const seat = button('', {
+    const seat = element('article', {
       className: `h5-seat h5-seat--${offset}`,
       attrs: {
-        'aria-label': `查看${player.playerName || player.hero.name}的扑克统计，气血${player.hp}`,
         'data-seat': idx,
+        'data-testid': `h5-seat-${idx}`,
+      },
+    });
+    const profileHit = button('', {
+      className: 'h5-seat__stats-open h5-stats-icon',
+      attrs: {
+        'aria-label': `查看${player.playerName || player.hero.name}的扑克统计，气血${player.hp}`,
         'data-testid': `h5-seat-stats-${idx}`,
       },
     });
+    const playerName = element('span', {
+      className: 'h5-seat__name',
+      text: player.playerName || player.hero.name,
+    });
+    const seatNumber = element('span', {
+      className: 'h5-seat__seat-no', text: String(idx),
+      attrs: { 'aria-label': `${idx}号位`, 'data-testid': `h5-seat-number-${idx}` },
+    });
+    const skillStatus = element('small', {
+      className: 'h5-seat__skill-state h5-visually-hidden',
+      text: '未发动',
+      attrs: { 'aria-hidden': 'true' },
+    });
+    const skillIcon = button('', {
+      className: 'h5-seat__skill',
+      attrs: {
+        'aria-label': `查看${player.hero.name}技能：${player.hero.skillName}`,
+        'data-testid': `h5-seat-skill-${idx}`,
+      },
+    }, [
+      element('span', { className: 'h5-seat__skill-glyph', text: '主' }),
+      skillStatus,
+    ]);
+    const passiveSkillIcon = button('', {
+      className: 'h5-seat__skill h5-seat__skill--passive',
+      attrs: {
+        'aria-label': `查看${player.hero.name}被动技能：${player.hero.skills?.passive?.name || '被动'}`,
+        'data-testid': `h5-seat-passive-skill-${idx}`,
+        'data-skill-state': 'passive',
+      },
+    }, [
+      element('span', { className: 'h5-seat__skill-glyph', text: '被' }),
+    ]);
     seat.append(
+      profileHit,
       portrait,
       heroName,
-      element('span', { className: 'h5-seat__name', text: player.playerName || player.hero.name }),
-      element('span', { className: 'h5-seat__hp' }, [hpFill, hpText]),
+      playerName,
+      element('span', {
+        className: 'h5-seat__hp',
+        attrs: { 'data-testid': `h5-seat-hp-${idx}`, 'aria-label': `气血 ${player.hp}` },
+      }, [hpFill, hpText]),
+      seatNumber,
       energy,
+      skillIcon,
+      passiveSkillIcon,
       action,
     );
-    seatMap.set(idx, { root: seat, portrait, hpFill, hpText, energy, action });
+    seatMap.set(idx, {
+      root: seat, profileHit, portrait, heroName, playerName, hpFill, hpText, energy,
+      seatNumber, skillIcon, passiveSkillIcon, skillStatus, action,
+    });
     statusNodes.set(idx, actionStatus);
     opponents.appendChild(seat);
   }
@@ -440,45 +584,124 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   const boardCards = Array.from({ length: 5 }, (_, index) => makeCard('h5-card--board', Config.BOARD_SLOT_NAMES[index + 1]));
   const board = element('div', { className: 'h5-board', attrs: { 'aria-label': '公共牌' } }, boardCards.map((item) => item.root));
   const handCards = [makeCard('h5-card--hand'), makeCard('h5-card--hand')];
-  const hand = element('div', { className: 'h5-hand', attrs: { 'aria-label': '我的暗令' } }, handCards.map((item) => item.root));
+  const handName = element('span', {
+    className: 'h5-hand__type',
+    text: '当前：--',
+    attrs: {
+      'data-testid': 'h5-current-hand-type',
+      'aria-live': 'polite',
+      'aria-label': '当前牌型：未发牌',
+    },
+  });
+  const handCardsRow = element('div', { className: 'h5-hand__cards' }, handCards.map((item) => item.root));
+  const hand = element('section', {
+    className: 'h5-hand',
+    attrs: { 'data-testid': 'h5-hole-hand', 'aria-label': '我的暗令与当前牌型' },
+  }, [handCardsRow, handName]);
 
   const myHpFill = element('span', { className: 'h5-me__hp-fill' });
   const myHpText = element('strong', { text: me.hp });
-  const myEnergy = element('span', { text: `⚡${me.energy}` });
+  const myEnergy = element('span', {
+    className: 'h5-me__energy',
+    text: String(me.energy),
+    attrs: { 'data-testid': 'h5-self-energy', 'aria-hidden': 'true' },
+  });
   const myStatusParts = makePlayerStatus(
     'h5-me__status h5-player-status',
     `h5-seat-status-${myIdx}`,
   );
   const myStatus = myStatusParts.root;
   statusNodes.set(myIdx, myStatusParts);
-  const handName = element('span', { className: 'h5-me__hand-name', text: '当前：--' });
-  const skillState = element('small', { className: 'h5-me__skill-state' });
-  const skillButton = button(me.hero.skillName, {
-    className: 'h5-skill-button',
-    attrs: { disabled: true, 'data-testid': 'h5-use-skill' },
+  const skillState = element('small', {
+    className: 'h5-me__skill-state h5-visually-hidden',
+    attrs: { 'data-testid': 'h5-skill-state', 'aria-live': 'polite' },
   });
-  const myPortrait = element('span', { className: 'h5-me__portrait', attrs: { 'aria-hidden': 'true' } });
-  myPortrait.style.backgroundImage = `url("${h5HeroPortrait(me.hero, 'thumb')}")`;
-  const myStatsButton = button('统计', {
-    className: 'h5-me__stats-open',
+  const skillName = element('strong', {
+    className: 'h5-skill-button__name', text: me.hero.skillName,
+    attrs: { 'data-testid': 'h5-skill-name' },
+  });
+  const mySkillIcon = element('span', {
+    className: 'h5-skill-button__icon', text: '主',
+    attrs: { 'data-testid': 'h5-skill-icon', 'aria-hidden': 'true' },
+  });
+  const skillButton = button('', {
+    className: 'h5-skill-button',
+    attrs: {
+      'aria-disabled': 'true',
+      'data-testid': 'h5-use-skill',
+      'data-tooltip': heroSkillTooltip(me.hero),
+      title: heroSkillTooltip(me.hero),
+    },
+  }, [
+    mySkillIcon,
+    element('span', { className: 'h5-skill-button__body' }, [skillName]),
+  ]);
+  const passive = me.hero.skills?.passive;
+  const passiveButton = button('', {
+    className: 'h5-passive-button',
+    attrs: {
+      'data-testid': 'h5-passive-skill',
+      'aria-label': `查看被动技能：${passive?.name || '被动'}`,
+      title: `被动【${passive?.name || '未知'}】${passive?.description || me.hero.passiveDesc || ''}`,
+    },
+  }, [
+    element('span', { className: 'h5-passive-button__icon', text: '被' }),
+    element('span', { className: 'h5-passive-button__body' }, [
+      element('strong', { text: passive?.name || '被动' }),
+    ]),
+  ]);
+  const myPortrait = element('span', {
+    className: 'h5-me__portrait',
+    attrs: { 'aria-hidden': 'true', 'data-testid': 'h5-self-portrait' },
+  });
+  myPortrait.style.backgroundImage = `url("${h5HeroPortrait(me.hero, 'detail')}")`;
+  const myStatsButton = button('', {
+    className: 'h5-me__stats-open h5-stats-icon',
     attrs: { 'data-testid': `h5-seat-stats-${myIdx}`, 'aria-label': '查看我的扑克统计' },
   });
-  const mePanel = element('section', { className: 'h5-me' }, [
+  const skillRail = element('div', {
+    className: 'h5-me__skills',
+    attrs: { 'aria-label': '主动与被动技能快捷入口' },
+  }, [skillButton, passiveButton]);
+  const extend = button('+30s·1⚡', {
+    className: 'h5-extend',
+    attrs: {
+      disabled: true,
+      'data-testid': 'h5-extend-time',
+      'aria-label': '延时30秒，消耗1点能量',
+      title: '延时30秒 · 消耗1⚡',
+    },
+  });
+  const turnTools = element('div', { className: 'h5-me__turn-tools' }, [myStatus, extend]);
+  const myPlayerName = element('strong', {
+    text: me.playerName || '你',
+    attrs: { 'data-testid': 'h5-self-player-name' },
+  });
+  const myHeroName = element('span', {
+    className: 'h5-me__hero-name', text: me.hero.name,
+    attrs: { 'aria-hidden': 'true' },
+  });
+  const selfSeatCard = element('div', {
+    className: 'h5-me__seat-card', attrs: { 'data-testid': 'h5-self-seat-card' },
+  }, [
     myPortrait,
+    myHeroName,
     element('div', { className: 'h5-me__identity' }, [
-      element('strong', { text: me.hero.name }),
-      element('span', { text: me.playerName || '你' }),
+      myPlayerName,
     ]),
-    element('div', { className: 'h5-me__stats' }, [
-      element('span', { className: 'h5-me__hp' }, [myHpFill, myHpText]),
+    element('div', { className: 'h5-me__stats', attrs: { 'data-testid': 'h5-self-vitals' } }, [
+      element('span', {
+        className: 'h5-me__hp', attrs: { 'data-testid': 'h5-self-hp', 'aria-label': '我的气血' },
+      }, [myHpFill, myHpText]),
       myEnergy,
     ]),
+    skillRail,
     myStatsButton,
-    myStatus,
-    handName,
-    skillButton,
-    skillState,
+    turnTools,
   ]);
+  const mePanel = element('section', {
+    className: 'h5-me', attrs: { 'data-testid': 'h5-self-seat' },
+  }, [selfSeatCard, hand, skillState]);
 
   const actionButtons = {
     fold: button('退避', { attrs: { 'data-testid': 'h5-action-fold' } }),
@@ -494,15 +717,58 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     actionButtons.fold, actionButtons.call, actionButtons.allin,
     actionButtons.raiseS, actionButtons.raiseM, actionButtons.raiseL,
   ]);
-  const extend = button('+30秒 · 1⚡', { className: 'h5-extend', attrs: { disabled: true, 'data-testid': 'h5-extend-time' } });
-  const dock = element('footer', { className: 'h5-battle__dock' }, [mePanel, hand, element('div', { className: 'h5-action-area' }, [handStrength, actions, extend])]);
+  const actionArea = element('div', { className: 'h5-action-area' }, [advisorPanel, handStrength, actions]);
+  const chatList = element('div', {
+    className: 'h5-chat-list',
+    attrs: { role: 'log', 'aria-live': 'polite', 'data-testid': 'h5-chat-list' },
+  }, [element('p', { className: 'h5-chat-list__empty', text: '暂无聊天消息' })]);
+  const chatInput = element('input', {
+    className: 'h5-chat-input',
+    attrs: {
+      type: 'text', maxlength: 80, placeholder: '和同桌玩家交流…',
+      'aria-label': '聊天内容', 'data-testid': 'h5-chat-input',
+    },
+  });
+  const chatSend = button('发送', {
+    className: 'h5-chat-send', attrs: { 'data-testid': 'h5-chat-send' },
+  });
+  const chatTab = button('聊天', {
+    className: 'h5-dock-tabs__tab is-active',
+    attrs: { role: 'tab', 'aria-selected': 'true', 'data-testid': 'h5-chat-tab' },
+  });
+  const reportTab = button('战报', {
+    className: 'h5-dock-tabs__tab',
+    attrs: { role: 'tab', 'aria-selected': 'false', 'data-testid': 'h5-report-tab' },
+  });
+  const chatPanel = element('section', {
+    className: 'h5-dock-panel is-active',
+    attrs: { role: 'tabpanel', 'data-panel': 'chat', 'data-testid': 'h5-chat-panel' },
+  }, [chatList, element('div', { className: 'h5-chat-compose' }, [chatInput, chatSend])]);
+  const reportPanel = element('section', {
+    className: 'h5-dock-panel',
+    attrs: { role: 'tabpanel', 'data-panel': 'report', hidden: true, 'data-testid': 'h5-report-panel' },
+  }, [logList]);
+  const dockSide = element('aside', {
+    className: 'h5-dock-side', attrs: { 'data-testid': 'h5-chat-report' },
+  }, [
+    element('div', { className: 'h5-dock-tabs', attrs: { role: 'tablist' } }, [chatTab, reportTab]),
+    chatPanel,
+    reportPanel,
+  ]);
+  const dock = element('footer', { className: 'h5-battle__dock' }, [mePanel, actionArea, dockSide]);
 
-  const table = element('main', { className: 'h5-table' }, [
+  const table = element('main', {
+    className: 'h5-table',
+    attrs: { 'data-player-count': String(playerCount) },
+  }, [
     opponents,
     element('section', { className: 'h5-table__center' }, [board, potText, hintText]),
-    advisorPanel,
+    skillHoverPreview,
   ]);
-  const screen = element('div', { className: 'h5-screen h5-battle', attrs: { 'data-testid': 'h5-battle' } }, [
+  const screen = element('div', {
+    className: 'h5-screen h5-battle',
+    attrs: { 'data-testid': 'h5-battle', 'data-player-count': String(playerCount) },
+  }, [
     element('header', { className: 'h5-battle__topbar' }, [
       element('strong', { text: '群英决' }), roundText, blindText,
       element('span', { className: 'h5-battle__spacer' }), advisorToggleLabel, networkText, logButton,
@@ -524,6 +790,36 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     logList.appendChild(row);
     while (logList.childElementCount > 80) logList.firstElementChild?.remove();
     logList.scrollTop = logList.scrollHeight;
+  }
+
+  function appendChatMessage({ name = '玩家', text = '' } = {}) {
+    const value = String(text || '').trim();
+    if (!value) return;
+    chatList.querySelector('.h5-chat-list__empty')?.remove();
+    chatList.appendChild(element('p', { className: 'h5-chat-message' }, [
+      element('strong', { text: `${name}：` }),
+      element('span', { text: value }),
+    ]));
+    while (chatList.childElementCount > 60) chatList.firstElementChild?.remove();
+    chatList.scrollTop = chatList.scrollHeight;
+  }
+
+  function selectDockTab(name) {
+    const chatActive = name === 'chat';
+    chatTab.classList.toggle('is-active', chatActive);
+    reportTab.classList.toggle('is-active', !chatActive);
+    chatTab.setAttribute('aria-selected', String(chatActive));
+    reportTab.setAttribute('aria-selected', String(!chatActive));
+    chatPanel.hidden = !chatActive;
+    reportPanel.hidden = chatActive;
+    chatPanel.classList.toggle('is-active', chatActive);
+    reportPanel.classList.toggle('is-active', !chatActive);
+  }
+
+  function submitChat() {
+    const text = chatInput.value.trim();
+    if (!text || !engine.sendChat?.(text)) return;
+    chatInput.value = '';
   }
 
   function rememberSeatAction(idx, key, amount = 0) {
@@ -578,9 +874,12 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     }
     const seat = seatMap.get(idx)?.root;
     if (seat) {
-      seat.setAttribute(
+      const label =
+        `查看${player.playerName || player.hero.name}的扑克统计，气血${player.hp}，状态${status.label}`;
+      seat.setAttribute('aria-label', label);
+      seatMap.get(idx)?.profileHit?.setAttribute(
         'aria-label',
-        `查看${player.playerName || player.hero.name}的扑克统计，气血${player.hp}，状态${status.label}`,
+        label,
       );
     }
     renderSeatCountdown(idx);
@@ -588,7 +887,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
 
   function renderAllSeatStatuses() {
     hydrateSeatActions();
-    for (let idx = 1; idx <= Config.PLAYER_COUNT; idx++) renderSeatStatus(idx);
+    for (let idx = 1; idx <= playerCount; idx++) renderSeatStatus(idx);
   }
 
   function resetStreetSeatActions() {
@@ -657,9 +956,117 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
       ]),
     ], 'h5-drawer--info h5-drawer--player-stats', { 'data-testid': 'h5-player-stats-panel' });
   }
-  for (const idx of relativeSeats) seatMap.get(idx).root.addEventListener('click', () => showPlayer(idx));
+  function showSkills(idx) {
+    const player = players[idx];
+    if (!player) return;
+    const active = player.hero.skills?.active;
+    const passiveSkill = player.hero.skills?.passive;
+    openDrawer(`${player.hero.name} · 武将技能`, [
+      element('section', { className: 'h5-skill-detail-card is-active' }, [
+        element('span', { className: 'h5-skill-detail-card__icon', text: UNIFIED_SKILL_GLYPH }),
+        element('div', {}, [
+          element('small', { text: '主动技能' }),
+          element('h3', { text: `${active?.name || player.hero.skillName} · ${active?.cost ?? player.hero.skillCost}⚡` }),
+          element('p', { text: active?.description || player.hero.skillDesc }),
+          element('em', { text: `条件：${active?.conditionDescription || player.hero.condDesc}` }),
+        ]),
+      ]),
+      element('section', { className: 'h5-skill-detail-card is-passive' }, [
+        element('span', { className: 'h5-skill-detail-card__icon', text: UNIFIED_SKILL_GLYPH }),
+        element('div', {}, [
+          element('small', { text: '被动技能' }),
+          element('h3', { text: passiveSkill?.name || '被动' }),
+          element('p', { text: passiveSkill?.description || player.hero.passiveDesc }),
+        ]),
+      ]),
+    ], 'h5-drawer--info h5-drawer--skills', { 'data-testid': 'h5-skill-detail-panel' });
+  }
+  function showSkillHoverPreview(idx, anchor) {
+    const player = players[idx];
+    if (!player || !anchor) return;
+    skillHoverPreview.textContent = heroSkillTooltip(player.hero);
+    skillHoverPreview.dataset.playerIdx = String(idx);
+    skillHoverPreview.hidden = false;
+    const tableRect = table.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const previewRect = skillHoverPreview.getBoundingClientRect();
+    const gap = 6;
+    const width = Math.min(previewRect.width || 300, Math.max(160, tableRect.width - 16));
+    const left = Math.max(8, Math.min(
+      tableRect.width - width - 8,
+      anchorRect.left - tableRect.left + anchorRect.width / 2 - width / 2,
+    ));
+    const below = anchorRect.bottom - tableRect.top + gap;
+    const top = below + (previewRect.height || 42) <= tableRect.height - 8
+      ? below
+      : Math.max(8, anchorRect.top - tableRect.top - (previewRect.height || 42) - gap);
+    skillHoverPreview.style.left = `${left}px`;
+    skillHoverPreview.style.top = `${top}px`;
+  }
+  function hideSkillHoverPreview(idx) {
+    if (idx !== undefined && skillHoverPreview.dataset.playerIdx !== String(idx)) return;
+    skillHoverPreview.hidden = true;
+    delete skillHoverPreview.dataset.playerIdx;
+  }
+  for (const idx of relativeSeats) {
+    const seat = seatMap.get(idx);
+    seat.profileHit.addEventListener('click', () => showPlayer(idx));
+    for (const icon of [seat.skillIcon, seat.passiveSkillIcon]) {
+      icon.addEventListener('mouseenter', () => showSkillHoverPreview(idx, icon));
+      icon.addEventListener('mouseleave', () => hideSkillHoverPreview(idx));
+      icon.addEventListener('focus', () => showSkillHoverPreview(idx, icon));
+      icon.addEventListener('blur', () => hideSkillHoverPreview(idx));
+      icon.addEventListener('click', () => {
+        hideSkillHoverPreview(idx);
+        showSkills(idx);
+      });
+    }
+  }
+  skillButton.addEventListener('mouseenter', () => showSkillHoverPreview(myIdx, skillButton));
+  skillButton.addEventListener('mouseleave', () => hideSkillHoverPreview(myIdx));
+  skillButton.addEventListener('focus', () => showSkillHoverPreview(myIdx, skillButton));
+  skillButton.addEventListener('blur', () => hideSkillHoverPreview(myIdx));
+  passiveButton.addEventListener('mouseenter', () => showSkillHoverPreview(myIdx, passiveButton));
+  passiveButton.addEventListener('mouseleave', () => hideSkillHoverPreview(myIdx));
+  passiveButton.addEventListener('focus', () => showSkillHoverPreview(myIdx, passiveButton));
+  passiveButton.addEventListener('blur', () => hideSkillHoverPreview(myIdx));
+  const bindSkillLongPress = (target) => {
+    let timer = null;
+    const cancel = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    };
+    target.addEventListener('pointerdown', () => {
+      cancel();
+      timer = setTimeout(() => {
+        timer = null;
+        target.dataset.longPressed = 'true';
+        showSkills(myIdx);
+      }, 520);
+    });
+    target.addEventListener('pointerup', cancel);
+    target.addEventListener('pointercancel', cancel);
+    target.addEventListener('pointerleave', cancel);
+  };
+  bindSkillLongPress(skillButton);
+  bindSkillLongPress(passiveButton);
   myStatsButton.addEventListener('click', () => showPlayer(myIdx));
-  logButton.addEventListener('click', () => openDrawer('战报', logList, 'h5-drawer--log'));
+  passiveButton.addEventListener('click', () => {
+    if (passiveButton.dataset.longPressed === 'true') {
+      delete passiveButton.dataset.longPressed;
+      return;
+    }
+    showSkills(myIdx);
+  });
+  chatTab.addEventListener('click', () => selectDockTab('chat'));
+  reportTab.addEventListener('click', () => selectDockTab('report'));
+  logButton.addEventListener('click', () => selectDockTab('report'));
+  chatSend.addEventListener('click', submitChat);
+  chatInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing) return;
+    event.preventDefault();
+    submitChat();
+  });
 
   function setHp(idx) {
     const player = players[idx];
@@ -667,14 +1074,64 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     if (idx === myIdx) {
       myHpFill.style.width = `${Math.round(ratio * 100)}%`;
       myHpText.textContent = String(player.hp);
-      myEnergy.textContent = `⚡${player.energy}`;
+      myEnergy.textContent = String(player.energy);
       return;
     }
     const seat = seatMap.get(idx);
     if (!seat) return;
-    seat.hpFill.style.width = `${Math.round(ratio * 100)}%`;
+    const percent = Math.round(ratio * 100);
+    seat.root.style.setProperty('--h5-seat-hp-percent', `${percent}%`);
+    seat.hpFill.style.width = '';
+    seat.hpFill.style.height = '';
     seat.hpText.textContent = String(player.hp);
-    seat.energy.textContent = `⚡${player.energy}`;
+    seat.energy.textContent = String(player.energy);
+    seat.root.classList.toggle('is-hp-low', percent <= 30 && percent > 15);
+    seat.root.classList.toggle('is-hp-critical', percent <= 15);
+    seat.root.querySelector('.h5-seat__hp')?.setAttribute('aria-label', `气血 ${player.hp}`);
+  }
+
+  function refreshSeatSkills() {
+    for (const [idx, seat] of seatMap) {
+      const player = players[idx];
+      const active = player?.hero?.skills?.active;
+      if (!player || !active) continue;
+      const charged = player.alive && !player.folded && !player.skillUsed
+        && Number(player.energy) >= Number(active.cost || 0);
+      const possible = charged && Number(engine.actingIdx) === Number(idx);
+      let state = 'idle';
+      let label = '未发动';
+      if (!player.alive) { state = 'dead'; label = '已阵亡'; }
+      else if (player.folded) { state = 'blocked'; label = '已退避'; }
+      else if (player.skillUsed) { state = 'used'; label = '已发动'; }
+      else if (possible) { state = 'possible'; label = '能量充足，可发动'; }
+      else if (charged) { state = 'charged'; label = '能量充足，等待行动'; }
+      seat.skillIcon.dataset.skillState = state;
+      seat.skillIcon.classList.toggle('is-ready', charged);
+      seat.skillStatus.textContent = label;
+      seat.skillIcon.title = `${heroSkillTooltip(player.hero)} · ${label}`;
+      seat.skillIcon.setAttribute(
+        'aria-label',
+        `查看${player.hero.name}技能：${player.hero.skillName}，当前能量${player.energy}，${label}`,
+      );
+    }
+  }
+
+  function refreshDealerSeats(dealerIdx = engine.dealerIdx) {
+    const activeDealer = Number(dealerIdx);
+    for (const [idx, seat] of seatMap) {
+      seat.root.classList.toggle('is-dealer', Number(idx) === activeDealer);
+    }
+    mePanel.classList.toggle('is-dealer', Number(myIdx) === activeDealer);
+  }
+
+  function flashSkill(idx) {
+    const node = Number(idx) === Number(myIdx)
+      ? skillButton
+      : seatMap.get(Number(idx))?.skillIcon;
+    if (!node) return;
+    node.classList.remove('is-triggered');
+    requestAnimationFrame(() => node.classList.add('is-triggered'));
+    setTimeout(() => node.classList.remove('is-triggered'), 900);
   }
 
   function updatePot() {
@@ -720,7 +1177,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     ]);
     feedbackLayer.append(effect, notice);
 
-    const core = new Set((current.core || []).map(cardSignature));
+    const core = new Set((feedback.tier === 'premium' ? me.hole : current.core || []).map(cardSignature));
     handCards.forEach((item, index) => {
       const active = core.has(cardSignature(me.hole[index]));
       item.root.classList.toggle('is-hit-core', active);
@@ -732,6 +1189,14 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
       item.root.classList.toggle('is-combo', active);
     });
     lastHandHitAt = Date.now();
+    if (feedback.strong) {
+      const vibrationKey = `${engine.round || 0}:${feedback.category}:${[...(current.core || [])]
+        .map(cardSignature).sort().join('|')}`;
+      if (vibrationKey !== lastStrongHandVibrationKey) {
+        lastStrongHandVibrationKey = vibrationKey;
+        requestH5StrongHandVibration(feedback.tier);
+      }
+    }
     playSFX(feedback.tier === 'legendary' ? 'judge' : 'drawx');
     handHitTimer = setTimeout(() => {
       notice.remove();
@@ -754,6 +1219,44 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
 
   function settlementRevealHost(idx) {
     return Number(idx) === Number(myIdx) ? table : seatMap.get(Number(idx))?.root;
+  }
+
+  function clearPublicHoleFeedback() {
+    screen.querySelectorAll('[data-h5-public-hole]').forEach((node) => node.remove());
+  }
+
+  function showPublicHoleCards(idx, hole, label = '公开底牌') {
+    const seat = Number(idx);
+    const cards = Array.isArray(hole) ? [hole[0] || null, hole[1] || null] : [null, null];
+    publicHoleCards.set(seat, cards);
+    if (seat === Number(myIdx)) {
+      cards.forEach((card, index) => {
+        if (card) handCards[index].setCard(card);
+      });
+      return;
+    }
+    const host = seatMap.get(seat)?.root;
+    if (!host) return;
+    host.querySelector(`[data-h5-public-hole][data-player-idx="${seat}"]`)?.remove();
+    const cardNodes = cards.map((cardValue) => {
+      const card = makeCard('h5-card--public-hole');
+      card.root.setAttribute('data-testid', 'h5-public-hole-card');
+      if (cardValue) card.setCard(cardValue);
+      else card.faceDown('未公开');
+      return card.root;
+    });
+    host.appendChild(element('span', {
+      className: 'h5-public-hole-reveal',
+      attrs: {
+        'data-testid': 'h5-public-hole-reveal',
+        'data-player-idx': seat,
+        'data-h5-public-hole': true,
+        'aria-label': `${players[seat]?.playerName || players[seat]?.hero?.name || '玩家'}${label}`,
+      },
+    }, [
+      element('span', { className: 'h5-public-hole-reveal__cards' }, cardNodes),
+      element('small', { text: label }),
+    ]));
   }
 
   function clearSettlementFeedback() {
@@ -946,22 +1449,54 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     } else render();
   }
 
+  function syncMajorHandEffect(current = null, hole = me.hole) {
+    const category = Number(current?.cat) || 0;
+    const premium = Number(engine.revealed || 0) === 0
+      ? classifyH5PremiumStartingHand(hole)
+      : null;
+    const active = Boolean(premium) || isH5StrongMadeHand(current, hole);
+    hand.classList.toggle('is-major-hand', active);
+    if (category > 0) hand.dataset.handCategory = String(category);
+    else delete hand.dataset.handCategory;
+    if (premium) hand.dataset.handTier = 'premium';
+    else if (active) hand.dataset.handTier = h5HandEffectTier(category);
+    else delete hand.dataset.handTier;
+  }
+
+  function resetCurrentHand() {
+    handCards.forEach((item) => item.faceDown());
+    handName.textContent = '当前：--';
+    handName.setAttribute('aria-label', '当前牌型：未发牌');
+    handName.removeAttribute('title');
+    syncMajorHandEffect();
+  }
+
   function updateHand({ announce = false, street = '' } = {}) {
     if (me.hole?.length >= 2) {
       handCards[0].setCard(me.hole[0]);
       handCards[1].setCard(me.hole[1]);
       const current = describe([...me.hole, ...engine.revealedBoard()]);
       handName.textContent = `当前：${current.name}`;
+      handName.setAttribute('aria-label', `当前牌型：${current.name}，${current.poker}`);
+      handName.title = `${current.name} · ${current.poker}`;
+      syncMajorHandEffect(current);
       if (announce) {
-        const feedback = classifyH5HandHit(lastHandCategory, current, me.hole, street);
+        const feedback = classifyH5HandHit(
+          lastHandCategory,
+          current,
+          me.hole,
+          street,
+          lastStrongHandActive,
+        );
         if (feedback) showHandHit(feedback, current);
       }
       lastHandCategory = current.cat;
+      lastStrongHandActive = isH5StrongMadeHand(current, me.hole);
       return current;
     } else {
-      handCards.forEach((item) => item.faceDown());
-      handName.textContent = '当前：--';
+      resetCurrentHand();
       lastHandCategory = null;
+      lastStrongHandActive = false;
     }
     return null;
   }
@@ -969,16 +1504,21 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   function refreshSkill() {
     if (destroyed) return;
     const available = engine.skillAvailability(myIdx);
-    const cost = available.cost ?? me.hero.skillCost;
     const isMyAction = Number(engine.actingIdx) === Number(myIdx)
       && Number(engine.waitingIdx) === Number(myIdx);
     const ready = available.ok && isMyAction && !pending;
-    skillButton.textContent = `${me.hero.skillName} · ${cost}⚡`;
-    skillButton.disabled = !ready;
+    skillName.textContent = me.hero.skillName;
+    skillButton.setAttribute('aria-disabled', String(!ready));
+    const state = ready ? 'ready'
+      : me.skillUsed ? 'used'
+        : !isMyAction ? 'waiting' : 'blocked';
+    skillButton.dataset.skillState = state;
+    skillButton.classList.toggle('is-ready', ready);
     skillState.textContent = ready
       ? '可发动'
       : !isMyAction ? '仅可在轮到你行动时发动' : available.reason || '';
     skillState.classList.toggle('is-ready', ready);
+    refreshSeatSkills();
   }
 
   function renderAdvisorEmpty(message) {
@@ -1143,7 +1683,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
 
   function setObservedTurnClock(idx, rawClock = null, fallbackSeconds = Config.ACTION_TIME) {
     const seatIdx = Number(rawClock?.idx ?? idx);
-    if (!Number.isInteger(seatIdx) || seatIdx < 1 || seatIdx > Config.PLAYER_COUNT) {
+    if (!Number.isInteger(seatIdx) || seatIdx < 1 || seatIdx > playerCount) {
       observedTurnClock = null;
       return;
     }
@@ -1158,9 +1698,9 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
       remainingMs,
       Number.isFinite(incomingTotal) ? incomingTotal : Config.ACTION_TIME * 1000,
     );
-    localTurnClockSeq += 1;
+    turnClockSequence += 1;
     observedTurnClock = {
-      turnId: rawClock?.turnId ?? `local-${localTurnClockSeq}`,
+      turnId: rawClock?.turnId ?? `mirror-${turnClockSequence}`,
       idx: seatIdx,
       remainingMs,
       totalMs,
@@ -1175,7 +1715,6 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
 
   function observedRemainingMs() {
     if (!observedTurnClock) return 0;
-    if (!online) return Math.max(0, observedTurnClock.remainingMs);
     return Math.max(
       0,
       observedTurnClock.remainingMs - (clockNow() - observedTurnClock.receivedAt),
@@ -1207,7 +1746,24 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     if (!actionPhaseStarted && ['preflop', 'flop', 'turn', 'river'].includes(engine.street)) {
       actionPhaseStarted = players.slice(1).some((player) => player?.acted || player?.lastAction);
     }
-    for (let idx = 1; idx <= Config.PLAYER_COUNT; idx++) setHp(idx);
+    for (let idx = 1; idx <= playerCount; idx++) setHp(idx);
+    myPlayerName.textContent = me.playerName || '你';
+    for (const [idx, nodes] of seatMap) {
+      const player = players[idx];
+      if (!player) continue;
+      const displayName = player.playerName || player.hero.name;
+      nodes.playerName.textContent = displayName;
+      nodes.heroName.textContent = player.hero.name;
+      nodes.root.setAttribute(
+        'aria-label',
+        `查看${displayName}的扑克统计，气血${player.hp}`,
+      );
+      nodes.profileHit.setAttribute(
+        'aria-label',
+        `查看${displayName}的扑克统计，气血${player.hp}`,
+      );
+    }
+    refreshDealerSeats();
     updatePot();
     updateHand();
     refreshSkill();
@@ -1420,6 +1976,10 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   }
 
   skillButton.addEventListener('click', () => {
+    if (skillButton.dataset.longPressed === 'true') {
+      delete skillButton.dataset.longPressed;
+      return;
+    }
     if (Number(engine.waitingIdx) !== Number(myIdx)
       || Number(engine.actingIdx) !== Number(myIdx)
       || !engine.canUseSkill(myIdx)
@@ -1429,8 +1989,11 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
 
   bindListener('onSync', refreshAll);
   bindListener('onLog', addLog);
+  bindListener('chat', appendChatMessage);
   bindListener('onRoundStart', (round, blinds, dealerIdx) => {
     clearTransientFeedback();
+    clearPublicHoleFeedback();
+    publicHoleCards.clear();
     seatActions.clear();
     clearObservedTurnClock();
     strengthCacheKey = '';
@@ -1439,17 +2002,26 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     turnIdx = null;
     actionPhaseStarted = false;
     lastHandCategory = null;
+    lastStrongHandActive = false;
     lastHandHitAt = 0;
+    lastStrongHandVibrationKey = '';
+    resetCurrentHand();
     roundText.textContent = `第 ${round}/${Config.MAX_ROUNDS} 回合`;
     blindText.textContent = `血祭 ${blinds.sb}/${blinds.bb}`;
-    for (const [idx, seat] of seatMap) seat.root.classList.toggle('is-dealer', idx === dealerIdx);
+    refreshDealerSeats(dealerIdx);
     hintText.textContent = '';
     boardCards.forEach((item, index) => item.faceDown(Config.BOARD_SLOT_NAMES[index + 1]));
     renderAllSeatStatuses();
     updatePot();
     refreshAdvisor();
   });
-  bindListener('onDeal', () => { updateHand(); refreshSkill(); refreshAdvisor(); });
+  bindListener('onDeal', () => {
+    const current = updateHand();
+    const premium = classifyH5PremiumStartingHand(me.hole);
+    if (premium && current) showHandHit(premium, { ...current, core: [...me.hole] });
+    refreshSkill();
+    refreshAdvisor();
+  });
   bindListener('onBlindsPosted', (smallIdx, small, bigIdx, big) => {
     actionPhaseStarted = true;
     rememberSeatAction(smallIdx, 'smallBlind', small);
@@ -1514,15 +2086,20 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   bindListener('onHoleChange', (idx) => {
     if (idx === myIdx) {
       lastHandCategory = null;
+      lastStrongHandActive = false;
       updateHand();
       refreshAdvisor();
     }
   });
   bindListener('onSkill', (idx, _skillId, skillName) => {
+    flashSkill(idx);
     addLog(`${players[idx].hero.name} 发动【${skillName}】`, 'skill');
     hintText.textContent = `【${skillName}】发动`;
   });
-  bindListener('onPassive', (idx, _skillId, skillName) => addLog(`${players[idx].hero.name} 被动【${skillName}】生效`, 'skill'));
+  bindListener('onPassive', (idx, _skillId, skillName) => {
+    flashSkill(idx);
+    addLog(`${players[idx].hero.name} 被动【${skillName}】生效`, 'skill');
+  });
   bindListener('onSkillEffect', (idx, _skillId, skillName) => addLog(`${players[idx].hero.name}【${skillName}】结算`, 'skill'));
   bindListener('onQuote', (idx, text) => addLog(`${players[idx].hero.name}：「${text}」`, 'quote'));
   bindListener('onSkillResult', (idx, result) => {
@@ -1533,6 +2110,11 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   });
   bindListener('onSkillPublicResult', (idx, result) => {
     if (result?.card) addLog(`${players[idx].hero.name} 公开 ${cardText(result.card)}`, 'skill');
+    if (result?.kind === 'reveal_self' && result.card && (result.cardIdx === 1 || result.cardIdx === 2)) {
+      const current = publicHoleCards.get(Number(idx)) || [null, null];
+      current[result.cardIdx - 1] = result.card;
+      showPublicHoleCards(idx, current, '技能公开');
+    }
   });
   bindListener('onPotAwarded', (winners, amount, uncontested, bonus = 0, netWinnings = {}) => {
     turnIdx = null;
@@ -1566,10 +2148,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     renderEmptyHandStrength('亮牌中');
     addLog('决死亮牌：公开所有在局暗令', 'result');
     for (const player of entrants) {
-      if (player.idx === myIdx && player.hole?.length >= 2) {
-        handCards[0].setCard(player.hole[0]);
-        handCards[1].setCard(player.hole[1]);
-      }
+      if (player.hole?.length >= 2) showPublicHoleCards(player.idx, player.hole, '决死亮牌');
     }
   });
   bindListener('onShowdown', (data) => {
@@ -1579,9 +2158,23 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
     strengthPauseLabel = '结算中';
     renderEmptyHandStrength('结算中');
     renderAllSeatStatuses();
+    clearPublicHoleFeedback();
+    publicHoleCards.clear();
     addLog(`亮招结算 · 总池 ${data.totalPot}`, 'result');
     const entry = data.entrants?.find((player) => player.idx === myIdx);
-    if (entry?.showdownInfo?.name) handName.textContent = `亮招：${entry.showdownInfo.name}`;
+    if (entry?.showdownInfo?.name) {
+      const category = Number(entry.showdownInfo.cat) || 0;
+      const poker = Config.HAND_NAMES[category]?.poker || '';
+      handName.textContent = `亮招：${entry.showdownInfo.name}`;
+      handName.setAttribute('aria-label', `亮招牌型：${entry.showdownInfo.name}${poker ? `，${poker}` : ''}`);
+      handName.title = poker ? `${entry.showdownInfo.name} · ${poker}` : entry.showdownInfo.name;
+      const showdownHole = entry.hole?.length >= 2 ? entry.hole : me.hole;
+      const showdownCards = [...showdownHole, ...engine.revealedBoard()];
+      const showdownHand = showdownCards.length >= 5
+        ? describe(showdownCards)
+        : { cat: category, core: [] };
+      syncMajorHandEffect(showdownHand, showdownHole);
+    }
     showShowdown(data);
     updatePot();
   });
@@ -1617,12 +2210,6 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
   return {
     tick(dt) {
       if (destroyed) return;
-      if (observedTurnClock && !online) {
-        observedTurnClock.remainingMs = Math.max(
-          0,
-          observedTurnClock.remainingMs - Math.max(0, Number(dt) || 0) * 1000,
-        );
-      }
       const observedIdx = Number(observedTurnClock?.idx || 0);
       if (observedIdx > 0 && observedIdx !== Number(myIdx)) {
         renderSeatCountdown(observedIdx);
@@ -1644,6 +2231,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, online = fa
       skillElapsed += dt;
       if (skillElapsed >= .25) {
         skillElapsed = 0;
+        myPlayerName.textContent = me.playerName || '你';
         refreshSkill();
       }
     },

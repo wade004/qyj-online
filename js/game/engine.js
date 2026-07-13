@@ -22,9 +22,53 @@ export function cardText(card) {
   return Config.SUITS[card.suit].char + Config.RANK_NAMES[card.rank];
 }
 
+function publicCardSnapshot(card) {
+  if (!card || typeof card !== 'object') return null;
+  return Object.freeze({ rank: Number(card.rank), suit: Number(card.suit) });
+}
+
+// Skill results are the only supported way for a seat to learn private cards.
+// Keep this allow-list deliberately narrow so a future result payload cannot
+// accidentally persist an Engine/player/deck reference in the information set.
+function skillKnowledgeSnapshot(result) {
+  if (!result || typeof result !== 'object') return Object.freeze({ kind: 'unknown' });
+  const snapshot = { kind: String(result.kind || 'unknown') };
+  for (const key of ['targetIdx', 'cardIdx', 'slot', 'suit']) {
+    if (Number.isFinite(Number(result[key]))) snapshot[key] = Number(result[key]);
+  }
+  for (const key of ['band', 'choice', 'skillName']) {
+    if (typeof result[key] === 'string') snapshot[key] = result[key];
+  }
+  if (result.card) snapshot.card = publicCardSnapshot(result.card);
+  return Object.freeze(snapshot);
+}
+
+function seatPosition(actorIdx, dealerIdx, handSeats) {
+  const seats = [...new Set((handSeats || []).map(Number))]
+    .filter((idx) => Number.isInteger(idx) && idx > 0)
+    .sort((a, b) => a - b);
+  if (!seats.includes(actorIdx) || !seats.includes(dealerIdx)) return null;
+  const dealerOffset = seats.indexOf(dealerIdx);
+  const order = seats.slice(dealerOffset).concat(seats.slice(0, dealerOffset));
+  const offset = order.indexOf(actorIdx);
+  if (seats.length === 2) return offset === 0 ? 'BTN/SB' : 'BB';
+  if (offset === 0) return 'BTN';
+  if (offset === 1) return 'SB';
+  if (offset === 2) return 'BB';
+  const earlyToLate = {
+    4: ['CO'],
+    5: ['UTG', 'CO'],
+    6: ['UTG', 'HJ', 'CO'],
+    7: ['UTG', 'LJ', 'HJ', 'CO'],
+    8: ['UTG', 'UTG+1', 'LJ', 'HJ', 'CO'],
+    9: ['UTG', 'UTG+1', 'MP', 'LJ', 'HJ', 'CO'],
+  };
+  return earlyToLate[seats.length]?.[offset - 3] || `EP+${offset - 3}`;
+}
+
 export class Engine {
   /**
-   * @param {string[]} heroIds 6个英雄id
+   * @param {string[]} heroIds 英雄id（至少覆盖桌型席位数）
    * @param {object} listeners 回调表
    * @param {Set<number>|null} humanSeats 真人座位集合（1-based）；缺省 {1}
    * @param {object} names 各座位显示名 { [idx]: name }
@@ -32,9 +76,20 @@ export class Engine {
    */
   constructor(heroIds, listeners, humanSeats = null, names = {}, rules = {}) {
     this.listeners = listeners || {};
+    const randomSource = typeof rules.rng === 'function' ? rules.rng : Math.random;
+    this.rng = () => {
+      const value = Number(randomSource());
+      if (!Number.isFinite(value)) throw new TypeError('Engine RNG must return a finite number');
+      return Math.max(0, Math.min(1 - Number.EPSILON, value));
+    };
+    const requestedTableSize = Number(rules.tableSize ?? Config.DEFAULT_TABLE_SIZE);
+    if (!Config.SUPPORTED_TABLE_SIZES.includes(requestedTableSize)) {
+      throw new RangeError(`Unsupported table size: ${requestedTableSize}`);
+    }
+    this.tableSize = requestedTableSize;
     humanSeats = humanSeats || new Set([1]);
     this.players = [null]; // 1-based
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= this.tableSize; i++) {
       const hero = getHero(heroIds[i - 1] || 'zhugeliang') || HEROES[0];
       this.players.push({
         idx: i,
@@ -68,9 +123,9 @@ export class Engine {
       });
     }
     // AI 座位随机分配互不相同的性格
-    const styles = shuffle([...Config.AI_STYLES]);
+    const styles = shuffle([...Config.AI_STYLES], this.rng);
     let si = 0;
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= this.tableSize; i++) {
       if (!this.players[i].isHuman) {
         this.players[i].style = styles[si % styles.length];
         si++;
@@ -78,7 +133,7 @@ export class Engine {
     }
 
     this.round = 0;
-    this.dealerIdx = 1 + Math.floor(Math.random() * Config.PLAYER_COUNT);
+    this.dealerIdx = 1 + Math.floor(this.rng() * this.tableSize);
     this.street = 'idle';
     this.deck = [];
     this.board = [];
@@ -95,6 +150,23 @@ export class Engine {
     this.deathCounter = 0;
     this.gameOver = false;
     this.endWhenHumanEliminated = !!rules.endWhenHumanEliminated;
+    // Explicitly disable both active and passive hero effects for neutral
+    // poker training/duplicate evaluation. Live games remain unchanged.
+    this.skillsEnabled = rules.skillsEnabled !== false;
+
+    // Append-only public betting history. `round` + `street` on every entry
+    // make actions from different hands/streets unambiguous to a bot.
+    this.actionHistory = [];
+    this.actionEventSeq = 0;
+    this.currentHandSeats = [];
+
+    // Existing skills used to send private discoveries only to the UI. Retain
+    // an allow-listed copy per observer so buildObservation can lawfully expose
+    // exactly what that seat learned, and no other seat's discoveries.
+    this.privateSkillKnowledge = [null];
+    for (let i = 1; i <= this.tableSize; i++) this.privateSkillKnowledge[i] = [];
+    this.publicSkillKnowledge = [];
+    this.skillKnowledgeSeq = 0;
 
     this.time = 0;
     this.queue = [];
@@ -122,6 +194,26 @@ export class Engine {
   // ---------------- 事件与工具 ----------------
 
   emit(name, ...args) {
+    if (name === 'onSkillResult') {
+      const observerIdx = Number(args[0]);
+      if (Number.isInteger(observerIdx) && observerIdx > 0) {
+        this.privateSkillKnowledge[observerIdx] ||= [];
+        this.privateSkillKnowledge[observerIdx].push(Object.freeze({
+          id: ++this.skillKnowledgeSeq,
+          round: this.round,
+          street: this.street,
+          result: skillKnowledgeSnapshot(args[1]),
+        }));
+      }
+    } else if (name === 'onSkillPublicResult') {
+      this.publicSkillKnowledge.push(Object.freeze({
+        id: ++this.skillKnowledgeSeq,
+        actorIdx: Number(args[0]),
+        round: this.round,
+        street: this.street,
+        result: skillKnowledgeSnapshot(args[1]),
+      }));
+    }
     const fn = this.listeners[name];
     if (fn) fn(...args);
   }
@@ -130,9 +222,64 @@ export class Engine {
     this.emit('onLog', text, kind);
   }
 
+  recordPublicAction(data) {
+    const activeSeats = (data.activeSeats || this.activePlayers().map((player) => player.idx))
+      .map(Number)
+      .filter((idx) => Number.isInteger(idx) && idx > 0);
+    const activeSeatsBefore = (data.activeSeatsBefore || activeSeats)
+      .map(Number)
+      .filter((idx) => Number.isInteger(idx) && idx > 0);
+    const board = (data.board || this.revealedBoard())
+      .map(publicCardSnapshot)
+      .filter(Boolean);
+    const handSeatSource = Array.isArray(data.handSeats) && data.handSeats.length
+      ? data.handSeats
+      : Array.isArray(this.currentHandSeats) && this.currentHandSeats.length
+        ? this.currentHandSeats
+        : activeSeatsBefore;
+    const handSeats = handSeatSource
+      .map(Number)
+      .filter((idx) => Number.isInteger(idx) && idx > 0);
+    const actorIdx = Number(data.actorIdx);
+    const dealerIdx = Number(data.dealerIdx ?? this.dealerIdx) || 0;
+    const optionalNumber = (value) => (value == null ? null : Number(value));
+    const event = Object.freeze({
+      id: ++this.actionEventSeq,
+      actorIdx,
+      round: Number(data.round ?? this.round),
+      street: String(data.street ?? this.street),
+      type: String(data.type || data.key || 'unknown'),
+      key: String(data.key || data.type || 'unknown'),
+      amount: Number(data.amount) || 0,
+      callAmount: Number(data.callAmount) || 0,
+      raiseIncrement: Number(data.raiseIncrement) || 0,
+      raiseTo: optionalNumber(data.raiseTo),
+      potBefore: Number(data.potBefore) || 0,
+      potAfter: Number(data.potAfter) || 0,
+      currentBetBefore: Number(data.currentBetBefore) || 0,
+      currentBetAfter: Number(data.currentBetAfter) || 0,
+      actorStackBefore: optionalNumber(data.actorStackBefore),
+      actorStackAfter: optionalNumber(data.actorStackAfter),
+      actorBetStreetBefore: optionalNumber(data.actorBetStreetBefore),
+      actorBetStreetAfter: optionalNumber(data.actorBetStreetAfter),
+      dealerIdx,
+      position: data.position || seatPosition(actorIdx, dealerIdx, handSeats),
+      playersInHand: activeSeatsBefore.length,
+      handSize: handSeats.length,
+      handSeats: Object.freeze(handSeats),
+      board: Object.freeze(board),
+      activeSeatsBefore: Object.freeze(activeSeatsBefore),
+      activeSeats: Object.freeze(activeSeats),
+      isAggressive: !!data.isAggressive,
+      forced: !!data.forced,
+    });
+    this.actionHistory.push(event);
+    return event;
+  }
+
   totalPot() {
     let pot = 0;
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) pot += this.players[i].betRound;
+    for (let i = 1; i <= this.tableSize; i++) pot += this.players[i].betRound;
     return pot;
   }
 
@@ -166,7 +313,7 @@ export class Engine {
     }
 
     const contribs = {};
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= this.tableSize; i++) {
       contribs[i] = this.players[i].betRound;
     }
     const rankedContributions = Object.entries(contribs)
@@ -211,13 +358,13 @@ export class Engine {
 
   aliveCount() {
     let n = 0;
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) if (this.players[i].alive) n++;
+    for (let i = 1; i <= this.tableSize; i++) if (this.players[i].alive) n++;
     return n;
   }
 
   activePlayers() {
     const t = [];
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= this.tableSize; i++) {
       const p = this.players[i];
       if (p.alive && !p.folded) t.push(p);
     }
@@ -225,8 +372,8 @@ export class Engine {
   }
 
   nextIdx(fromIdx, filter) {
-    for (let step = 1; step <= Config.PLAYER_COUNT; step++) {
-      const i = ((fromIdx - 1 + step) % Config.PLAYER_COUNT) + 1;
+    for (let step = 1; step <= this.tableSize; step++) {
+      const i = ((fromIdx - 1 + step) % this.tableSize) + 1;
       const p = this.players[i];
       if (p.alive && (!filter || filter(p))) return i;
     }
@@ -238,7 +385,7 @@ export class Engine {
   startGame() {
     this.log('═ 群雄穿越时空，齐聚决斗阵盘 ═', 'sys');
     this.delay(0.35, () => {
-      for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+      for (let i = 1; i <= this.tableSize; i++) {
         this.emit('onQuote', i, this.players[i].hero.lines.enter);
       }
     });
@@ -254,16 +401,19 @@ export class Engine {
     this.actionCursorIdx = 0;
     this.waitingIdx = null;
 
-    this.deck = newShuffledDeck();
+    this.deck = newShuffledDeck(this.rng);
     this.board = [];
     for (let i = 0; i < 5; i++) this.board.push(draw(this.deck));
     this.revealed = 0;
     this.street = 'preflop';
+    this.currentBet = 0;
+    this.minRaiseInc = 0;
+    this.streetRaiseCount = 0;
     this.streetHadRaise = false;
     this.allInHandsRevealed = false;
     this.lastAggressiveWager = null;
 
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= this.tableSize; i++) {
       const p = this.players[i];
       p.roundStartHp = p.hp;
       p.hole = [];
@@ -277,6 +427,7 @@ export class Engine {
       resetRoundSkillState(p);
       p.showdownInfo = null;
     }
+    this.currentHandSeats = this.activePlayers().map((player) => player.idx);
 
     const nextDealer = this.nextIdx(this.dealerIdx);
     if (nextDealer) this.dealerIdx = nextDealer;
@@ -285,14 +436,14 @@ export class Engine {
     this.log(`── 第 ${this.round}/${Config.MAX_ROUNDS} 回合 · 血祭 ${blinds.sb}/${blinds.bb} ──`, 'sys');
 
     // 发令
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= this.tableSize; i++) {
       const p = this.players[i];
       if (p.alive) {
         p.hole = [draw(this.deck), draw(this.deck)];
         p.lastHandCategory = describe(p.hole).cat;
       }
     }
-    dispatchSkillEvent(this, 'DEAL');
+    if (this.skillsEnabled) dispatchSkillEvent(this, 'DEAL');
     this.emit('onDeal');
 
     // 血祭
@@ -300,8 +451,55 @@ export class Engine {
     const sbIdx = headsUp ? this.dealerIdx : this.nextIdx(this.dealerIdx);
     const bbIdx = sbIdx ? this.nextIdx(sbIdx) : null;
     if (!sbIdx || !bbIdx) return;
+    const activeSeatsAtBlinds = this.activePlayers().map((player) => player.idx);
+    const sbStackBefore = this.players[sbIdx].hp;
+    const sbPotBefore = this.totalPot();
     const sbPaid = this.commit(this.players[sbIdx], Math.min(blinds.sb, this.players[sbIdx].hp));
+    this.recordPublicAction({
+      actorIdx: sbIdx,
+      type: 'blind',
+      key: 'smallBlind',
+      amount: sbPaid,
+      callAmount: 0,
+      raiseIncrement: 0,
+      raiseTo: sbPaid,
+      potBefore: sbPotBefore,
+      potAfter: this.totalPot(),
+      currentBetBefore: 0,
+      currentBetAfter: sbPaid,
+      actorStackBefore: sbStackBefore,
+      actorStackAfter: this.players[sbIdx].hp,
+      actorBetStreetBefore: 0,
+      actorBetStreetAfter: this.players[sbIdx].betStreet,
+      activeSeatsBefore: activeSeatsAtBlinds,
+      activeSeats: this.activePlayers().map((player) => player.idx),
+      handSeats: this.currentHandSeats,
+      forced: true,
+    });
+    const bbStackBefore = this.players[bbIdx].hp;
+    const bbPotBefore = this.totalPot();
     const bbPaid = this.commit(this.players[bbIdx], Math.min(blinds.bb, this.players[bbIdx].hp));
+    this.recordPublicAction({
+      actorIdx: bbIdx,
+      type: 'blind',
+      key: 'bigBlind',
+      amount: bbPaid,
+      callAmount: 0,
+      raiseIncrement: Math.max(0, bbPaid - sbPaid),
+      raiseTo: Math.max(sbPaid, bbPaid),
+      potBefore: bbPotBefore,
+      potAfter: this.totalPot(),
+      currentBetBefore: sbPaid,
+      currentBetAfter: Math.max(sbPaid, bbPaid),
+      actorStackBefore: bbStackBefore,
+      actorStackAfter: this.players[bbIdx].hp,
+      actorBetStreetBefore: 0,
+      actorBetStreetAfter: this.players[bbIdx].betStreet,
+      activeSeatsBefore: activeSeatsAtBlinds,
+      activeSeats: this.activePlayers().map((player) => player.idx),
+      handSeats: this.currentHandSeats,
+      forced: true,
+    });
     this.players[sbIdx].lastAction = {
       key: 'smallBlind', amount: sbPaid, street: this.street, round: this.round,
     };
@@ -389,7 +587,7 @@ export class Engine {
       this.waitingIdx = p.idx;
       this.emit('onAwaitAction', p.idx, this.getOptions(p));
     } else {
-      this.delay(0.9 + Math.random() * 1.1, () => {
+      this.delay(0.9 + this.rng() * 1.1, () => {
         if (this.gameOver || p.folded || !p.alive) {
           this.actingIdx = 0;
           this.proceedAction();
@@ -415,6 +613,9 @@ export class Engine {
     this.actionCursorIdx = p.idx;
     const name = p.hero.name;
     const potBeforeAction = this.totalPot();
+    const callAmountBefore = Math.min(Math.max(0, this.currentBet - p.betStreet), p.hp);
+    const actorStackBefore = p.hp;
+    const activeSeatsBefore = this.activePlayers().map((player) => player.idx);
     const publicActionContext = {
       round: this.round,
       street: this.street,
@@ -436,6 +637,31 @@ export class Engine {
       // private rotation cursor separately so reconnects never report the
       // previous player as still acting.
       this.actingIdx = 0;
+      this.recordPublicAction({
+        actorIdx: p.idx,
+        round: publicActionContext.round,
+        street: publicActionContext.street,
+        type: act.type,
+        key,
+        amount,
+        callAmount: callAmountBefore,
+        raiseIncrement: isAggressive
+          ? Math.max(0, this.currentBet - publicActionContext.currentBetBefore)
+          : 0,
+        raiseTo: isAggressive ? this.currentBet : null,
+        potBefore: publicActionContext.potBefore,
+        potAfter: this.totalPot(),
+        currentBetBefore: publicActionContext.currentBetBefore,
+        currentBetAfter: this.currentBet,
+        actorStackBefore,
+        actorStackAfter: p.hp,
+        actorBetStreetBefore: publicActionContext.betStreetBefore,
+        actorBetStreetAfter: p.betStreet,
+        activeSeatsBefore,
+        activeSeats: this.activePlayers().map((player) => player.idx),
+        handSeats: this.currentHandSeats,
+        isAggressive,
+      });
       this.emit(
         'onAction',
         p.idx,
@@ -475,7 +701,7 @@ export class Engine {
       this.streetRaiseCount++;
       p.acted = true;
       p.lastActionBet = this.currentBet;
-      for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+      for (let i = 1; i <= this.tableSize; i++) {
         if (i !== p.idx) this.players[i].acted = false;
       }
       this.lastAggressiveWager = {
@@ -501,7 +727,7 @@ export class Engine {
         this.currentBet = p.betStreet;
         this.streetRaiseCount++;
         if (fullRaise) {
-          for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+          for (let i = 1; i <= this.tableSize; i++) {
             if (i !== p.idx) this.players[i].acted = false;
           }
         }
@@ -520,9 +746,11 @@ export class Engine {
       this.emit('onQuote', p.idx, p.hero.lines.allin);
       this.log(`${name} 决死！押上全部 ${pay} 气血！`, 'allin');
     }
-    dispatchSkillEvent(this, 'ACTION', {
-      actor: p, type: act.type, group: actionGroup, activeCount: this.activePlayers().length,
-    });
+    if (this.skillsEnabled) {
+      dispatchSkillEvent(this, 'ACTION', {
+        actor: p, type: act.type, group: actionGroup, activeCount: this.activePlayers().length,
+      });
+    }
     this.delay(0.55, () => this.proceedAction());
   }
 
@@ -546,11 +774,13 @@ export class Engine {
     this.waitingIdx = null;
     this.revealAllInHandsIfClosed();
     if (this.street !== 'river') {
-      dispatchSkillEvent(this, 'STREET_ADVANCE', {
-        from: this.street, hadRaise: this.streetHadRaise,
-      });
+      if (this.skillsEnabled) {
+        dispatchSkillEvent(this, 'STREET_ADVANCE', {
+          from: this.street, hadRaise: this.streetHadRaise,
+        });
+      }
     }
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= this.tableSize; i++) {
       const player = this.players[i];
       player.betStreet = 0;
       player.acted = false;
@@ -583,9 +813,11 @@ export class Engine {
       p.lastHandCategory = category;
     }
     const cards = this.board.slice(oldRevealed, revealTo);
-    dispatchSkillEvent(this, 'BOARD_REVEALED', {
-      street: nextStreet, cards, firstCard: cards[0], changedIds,
-    });
+    if (this.skillsEnabled) {
+      dispatchSkillEvent(this, 'BOARD_REVEALED', {
+        street: nextStreet, cards, firstCard: cards[0], changedIds,
+      });
+    }
 
     let canAct = 0;
     for (const p of this.activePlayers()) if (!p.allIn) canAct++;
@@ -623,8 +855,10 @@ export class Engine {
     }
     p.hp += pot;
     this.emit('onHpChange', p.idx);
-    dispatchSkillEvent(this, 'UNCONTESTED_WIN', { winner: p });
-    dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'uncontested', winner: p });
+    if (this.skillsEnabled) {
+      dispatchSkillEvent(this, 'UNCONTESTED_WIN', { winner: p });
+      dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'uncontested', winner: p });
+    }
     this.emit('onPotAwarded', [p.idx], pot, true, 0, netWinnings);
     this.log(`${p.hero.name} 兵不血刃，净赢 ${netWinnings[p.idx]}`, 'win');
     this.delay(2.2, () => this.endRound());
@@ -677,10 +911,10 @@ export class Engine {
       const remainder = pot.amount - share * winners.length;
       const awards = {};
       const oddChipOrder = [...winners].sort((a, b) => {
-        const distanceA = (a.idx - this.dealerIdx + Config.PLAYER_COUNT) % Config.PLAYER_COUNT
-          || Config.PLAYER_COUNT;
-        const distanceB = (b.idx - this.dealerIdx + Config.PLAYER_COUNT) % Config.PLAYER_COUNT
-          || Config.PLAYER_COUNT;
+        const distanceA = (a.idx - this.dealerIdx + this.tableSize) % this.tableSize
+          || this.tableSize;
+        const distanceB = (b.idx - this.dealerIdx + this.tableSize) % this.tableSize
+          || this.tableSize;
         return distanceA - distanceB;
       });
       oddChipOrder.forEach((p, wi) => {
@@ -715,10 +949,12 @@ export class Engine {
     }
 
     const entrantIds = new Set(entrants.map((p) => p.idx));
-    dispatchSkillEvent(this, 'SHOWDOWN_RESULT', {
-      entrants, entrantIds, winnerIds: winnersAll, wonAmount,
-    });
-    dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'showdown', winnerIds: winnersAll });
+    if (this.skillsEnabled) {
+      dispatchSkillEvent(this, 'SHOWDOWN_RESULT', {
+        entrants, entrantIds, winnerIds: winnersAll, wonAmount,
+      });
+      dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'showdown', winnerIds: winnersAll });
+    }
 
     const netResult = {};
     for (const p of this.players.slice(1)) {
@@ -805,8 +1041,8 @@ export class Engine {
     this.actingIdx = 0;
     this.actionCursorIdx = 0;
     this.waitingIdx = null;
-    dispatchSkillEvent(this, 'ROUND_END', { round: this.round });
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    if (this.skillsEnabled) dispatchSkillEvent(this, 'ROUND_END', { round: this.round });
+    for (let i = 1; i <= this.tableSize; i++) {
       const p = this.players[i];
       if (p.alive && p.hp <= 0) {
         p.alive = false;
@@ -860,19 +1096,25 @@ export class Engine {
   // ---------------- 技能系统 ----------------
 
   canUseSkill(idx) {
+    if (!this.skillsEnabled) return false;
     const p = this.players[idx];
     return getSkillAvailability(this, p).ok;
   }
 
   skillAvailability(idx) {
+    if (!this.skillsEnabled) {
+      return { ok: false, reason: '训练规则已关闭技能', skill: null, cost: 0 };
+    }
     return getSkillAvailability(this, this.players[idx]);
   }
 
   getSkillPrompt(idx) {
+    if (!this.skillsEnabled) return null;
     return getSkillInput(this, this.players[idx]);
   }
 
   useSkill(idx, selection = null) {
+    if (!this.skillsEnabled) return false;
     return executeActiveSkill(this, this.players[idx], selection);
   }
 }

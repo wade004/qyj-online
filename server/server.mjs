@@ -9,13 +9,18 @@
 
 import { WebSocketServer } from 'ws';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { createServer as createHttpServer } from 'node:http';
 import { Engine } from '../js/game/engine.js';
 import { HEROES, getHero } from '../js/game/heroes.js';
 import { shuffle } from '../js/game/deck.js';
 import * as Config from '../js/game/config.js';
 import {
+  DEFAULT_TABLE_SIZE,
   DEFAULT_MAX_PAYLOAD_BYTES,
   ERROR_CODES,
+  PROTOCOL_VERSION,
+  SUPPORTED_TABLE_SIZES,
+  TABLE_SIZE_9_CAPABILITY,
   decodeClientMessage,
   errorEvent,
 } from './protocol.mjs';
@@ -24,9 +29,15 @@ import {
   DEFAULT_DATABASE_PATH,
   PlayerValidationError,
   createPlayerStore,
-  guestFingerprint,
   normalizeNickname,
 } from './player-store.mjs';
+import {
+  authSessionHash,
+  authTokenFromRequest,
+  createAuthHttpHandler,
+  isTrustedOrigin,
+} from './auth-http.mjs';
+import { createPasswordResetMailer } from './password-mailer.mjs';
 
 const NAME_POOL = [
   '燕云骑', '白毦卫', '陷阵者', '虎贲郎', '玄甲卫', '锐士',
@@ -35,10 +46,22 @@ const NAME_POOL = [
 ];
 const TEAM_NAME_POOL = ['虎贲营', '玄甲营', '飞羽营', '锐士营', '陷阵营', '青龙寨', '白虎堂', '朱雀坛'];
 const MAX_TEAMS = 20;
-const MAX_TEAM_MEMBERS = 3;
 const PICK_TIME = 60;
 const TICK_MS = 50;
 const SESSION_HANDSHAKE_MS = 25;
+
+const SUPPORTED_TABLE_SIZE_SET = new Set(SUPPORTED_TABLE_SIZES);
+const tableSizeOf = (team) => SUPPORTED_TABLE_SIZE_SET.has(team?.tableSize)
+  ? team.tableSize : DEFAULT_TABLE_SIZE;
+const tableRules = (team) => {
+  const tableSize = tableSizeOf(team);
+  return {
+    tableSize,
+    maxMembers: tableSize,
+    totalPlayers: tableSize,
+    rounds: Config.MAX_ROUNDS,
+  };
+};
 
 const emptyPokerHand = (round, playerId) => ({
   round,
@@ -199,6 +222,12 @@ export function startServer(port = 8790, {
   shutdownGraceMs = 1_000,
   resumeGraceMs = 90_000,
   databasePath = DEFAULT_DATABASE_PATH,
+  trustedOrigins = String(process.env.QYJ_TRUSTED_ORIGINS || '')
+    .split(',').map((value) => value.trim()).filter(Boolean),
+  cookieSecure = process.env.NODE_ENV === 'production',
+  authRateLimitMultiplier = 1,
+  passwordResetMailer = null,
+  publicAppUrl = process.env.PUBLIC_APP_URL,
 } = {}) {
   const payloadLimit = Number.isSafeInteger(maxPayload) && maxPayload > 0
     ? maxPayload
@@ -212,12 +241,39 @@ export function startServer(port = 8790, {
   const resumeGrace = Number.isFinite(resumeGraceMs) && resumeGraceMs >= 0
     ? resumeGraceMs
     : 90_000;
+  const allowedOrigins = [
+    ...(Array.isArray(trustedOrigins) ? trustedOrigins : []),
+    ...(publicAppUrl ? [publicAppUrl] : []),
+  ];
   const playerStore = createPlayerStore({ databasePath });
-  let wss;
+  let mailer;
   try {
-    wss = new WebSocketServer({ port, maxPayload: payloadLimit });
+    mailer = passwordResetMailer || createPasswordResetMailer({ publicAppUrl });
   } catch (error) {
     playerStore.close();
+    throw error;
+  }
+  let authHttpHandler = null;
+  const httpServer = createHttpServer((request, response) => {
+    Promise.resolve(authHttpHandler?.(request, response)).then((handled) => {
+      if (handled || response.writableEnded) return;
+      response.statusCode = 404;
+      response.setHeader('content-type', 'application/json; charset=utf-8');
+      response.end(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: '接口不存在' } }));
+    }).catch((error) => {
+      console.error('[Server] HTTP 请求处理失败', error);
+      if (response.writableEnded) return;
+      response.statusCode = 500;
+      response.setHeader('content-type', 'application/json; charset=utf-8');
+      response.end(JSON.stringify({ ok: false, error: { code: 'INTERNAL_ERROR', message: '服务暂时不可用' } }));
+    });
+  });
+  let wss;
+  try {
+    wss = new WebSocketServer({ server: httpServer, maxPayload: payloadLimit });
+  } catch (error) {
+    playerStore.close();
+    httpServer.close();
     throw error;
   }
   let closing = false;
@@ -232,8 +288,8 @@ export function startServer(port = 8790, {
   };
 
   const ready = new Promise((resolve, reject) => {
-    wss.once('listening', resolve);
-    wss.once('error', reject);
+    httpServer.once('listening', resolve);
+    httpServer.once('error', reject);
   });
   // Keep legacy callers safe when they do not await readiness; the original
   // promise still rejects for callers that do await it.
@@ -248,6 +304,7 @@ export function startServer(port = 8790, {
   let nextClientId = 1;
   let nextTeamId = 1;
   let nameCounter = 0;
+  const RESUME_REJECTED = Symbol('resume-rejected');
 
   // ---------------- 发送工具 ----------------
 
@@ -293,7 +350,23 @@ export function startServer(port = 8790, {
       if (bound.playerId !== profile.playerId) continue;
       bound.playerProfile = profile;
       bound.name = profile.nickname;
-      if (bound.teamId) affectedTeamIds.add(bound.teamId);
+      if (bound.teamId) {
+        affectedTeamIds.add(bound.teamId);
+        const team = teams.get(bound.teamId);
+        const game = team?.game;
+        const seat = Number(bound.seat);
+        if (game && Number.isInteger(seat) && seat > 0) {
+          const rosterPlayer = game.players?.find((player) => Number(player.seat) === seat);
+          if (rosterPlayer) {
+            rosterPlayer.name = profile.nickname;
+            rosterPlayer.shortId = profile.shortId ?? rosterPlayer.shortId;
+            rosterPlayer.emblem = profile.emblem ?? rosterPlayer.emblem;
+            rosterPlayer.pokerStats = profile.pokerStats ?? rosterPlayer.pokerStats;
+          }
+          const enginePlayer = game.engine?.players?.[seat];
+          if (enginePlayer) enginePlayer.playerName = profile.nickname;
+        }
+      }
       if (notify) sendPlayerProfile(bound, profile, saved);
     }
     return affectedTeamIds;
@@ -308,14 +381,29 @@ export function startServer(port = 8790, {
     broadcastLobby();
   }
 
+  function applyClientMetadata(client, msg = {}) {
+    if (!client) return;
+    if (Number.isSafeInteger(msg.protocolVersion)) {
+      client.protocolVersion = msg.protocolVersion;
+    }
+    if (Array.isArray(msg.capabilities)) {
+      client.capabilities = new Set(msg.capabilities);
+    }
+  }
+
+  const clientSupportsTableSize = (client, tableSize) => tableSize === DEFAULT_TABLE_SIZE
+    || (tableSize === 9 && client?.capabilities?.has(TABLE_SIZE_9_CAPABILITY));
+
   function sendLobbyTo(client) {
     const list = [...teams.values()]
+      .filter((team) => clientSupportsTableSize(client, tableSizeOf(team)))
       .map((t) => ({
         id: t.id,
         name: t.name,
         count: t.members.length,
         onlineCount: t.members.filter((id) => clients.get(id)?.connected).length,
         phase: t.phase,
+        ...tableRules(t),
       }))
       .sort((a, b) => a.id - b.id);
     send(client, {
@@ -325,7 +413,7 @@ export function startServer(port = 8790, {
   }
   function broadcastLobby() {
     for (const c of clients.values()) {
-      if (!c.teamId) sendLobbyTo(c);
+      if (!c.teamId && c.authSessionHash) sendLobbyTo(c);
     }
   }
 
@@ -340,32 +428,68 @@ export function startServer(port = 8790, {
   function sendSession(client, resumed) {
     send(client, {
       ev: 'session',
-      a: { resumeToken: client.resumeToken, resumed, resumeGraceMs: resumeGrace },
+      a: {
+        resumeToken: client.resumeToken || null,
+        resumed,
+        resumeGraceMs: resumeGrace,
+        protocolVersion: PROTOCOL_VERSION,
+        supportedTableSizes: [...SUPPORTED_TABLE_SIZES],
+        authenticated: Boolean(client.playerId && client.authSessionHash),
+        account: client.account || null,
+        profile: client.playerProfile || null,
+      },
     });
   }
 
-  function createClient(ws) {
+  function sessionExpiresAt(value) {
+    const raw = value?.expiresAt ?? value?.sessionExpiresAt ?? value?.session?.expiresAt;
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function accountFromSession(value) {
+    const source = value?.account || value;
+    if (!source || (!source.username && !source.email)) return null;
+    return {
+      username: source.username,
+      email: source.email,
+      createdAt: source.createdAt,
+    };
+  }
+
+  function createClient(ws, metadata = null, auth = null) {
+    const profile = auth?.profile || auth?.account?.profile || null;
+    const playerId = auth?.playerId || profile?.playerId || auth?.account?.playerId || null;
+    const authenticated = Boolean(playerId && auth?.sessionHash);
     const client = {
       ws,
       id: nextClientId++,
-      name: NAME_POOL[Math.floor(Math.random() * NAME_POOL.length)] + '·' + (++nameCounter),
+      name: profile?.nickname || NAME_POOL[Math.floor(Math.random() * NAME_POOL.length)] + '·' + (++nameCounter),
       teamId: null,
       seat: null,
       connected: true,
       isAlive: true,
-      resumeToken: issueResumeToken(),
+      resumeToken: authenticated ? issueResumeToken() : null,
       resumeTimer: null,
       resumeExpiresAt: null,
       pendingResult: null,
-      playerId: null,
+      playerId,
       guestHash: null,
-      playerProfile: null,
+      playerProfile: profile,
+      account: authenticated ? accountFromSession(auth) : null,
+      authSessionHash: authenticated ? auth.sessionHash : null,
+      authExpiresAt: authenticated ? sessionExpiresAt(auth) : null,
+      protocolVersion: 1,
+      capabilities: new Set(),
     };
+    applyClientMetadata(client, metadata || {});
     clients.set(client.id, client);
-    sessions.set(client.resumeToken, client);
+    if (client.resumeToken) sessions.set(client.resumeToken, client);
     console.log(`[Server] 客户端接入 #${client.id} 赐名 ${client.name}`);
     sendSession(client, false);
-    sendLobbyTo(client);
+    if (authenticated) sendLobbyTo(client);
     return client;
   }
 
@@ -393,7 +517,7 @@ export function startServer(port = 8790, {
       }
     }
 
-    if (resumeGrace === 0) {
+    if (resumeGrace === 0 || !client.resumeToken || !client.authSessionHash) {
       expireClient(client);
       return;
     }
@@ -405,13 +529,26 @@ export function startServer(port = 8790, {
     broadcastLobby();
   }
 
-  function resumeClient(ws, resumeToken) {
+  function resumeClient(ws, resumeToken, metadata = null, auth = null) {
     const client = sessions.get(resumeToken);
     if (!client) return null;
+    if (!auth?.sessionHash || auth.sessionHash !== client.authSessionHash) return null;
     if (!client.connected && client.resumeExpiresAt != null
       && client.resumeExpiresAt <= Date.now()) {
       expireClient(client);
       return null;
+    }
+    const team = client.teamId ? teams.get(client.teamId) : null;
+    const resumeCapabilities = new Set(
+      Array.isArray(metadata?.capabilities) ? metadata.capabilities : [],
+    );
+    if (tableSizeOf(team) === 9 && !resumeCapabilities.has(TABLE_SIZE_9_CAPABILITY)) {
+      sendSocket(ws, errorEvent(
+        ERROR_CODES.CLIENT_UPGRADE_REQUIRED,
+        '当前客户端不支持恢复 9 人桌，请升级后重试',
+      ));
+      try { ws.close(4003, ERROR_CODES.CLIENT_UPGRADE_REQUIRED); } catch { ws.terminate(); }
+      return RESUME_REJECTED;
     }
 
     const previousWs = client.ws;
@@ -421,6 +558,13 @@ export function startServer(port = 8790, {
     client.ws = ws;
     client.connected = true;
     client.isAlive = true;
+    client.protocolVersion = 1;
+    client.capabilities = new Set();
+    client.account = accountFromSession(auth);
+    client.playerProfile = auth.profile || auth.account?.profile || client.playerProfile;
+    client.name = client.playerProfile?.nickname || client.name;
+    client.authExpiresAt = sessionExpiresAt(auth);
+    applyClientMetadata(client, metadata || {});
     sessions.set(client.resumeToken, client);
     if (previousWs && previousWs !== ws && previousWs.readyState < 2) {
       try { previousWs.close(4000, 'SESSION_REPLACED'); } catch { previousWs.terminate(); }
@@ -428,7 +572,6 @@ export function startServer(port = 8790, {
 
     console.log(`[Server] 会话恢复 #${client.id}`);
     const hadPendingResult = Boolean(client.pendingResult);
-    const team = client.teamId ? teams.get(client.teamId) : null;
     sendSession(client, true);
     sendResumeState(client);
     if (team && (team.phase === 'playing' || hadPendingResult)) sendTeamState(team);
@@ -458,7 +601,8 @@ export function startServer(port = 8790, {
         a: {
           id: team.id, name: team.name, phase: team.phase,
           members, isOwner: id === team.ownerId,
-          yourName: c.name, maxMembers: MAX_TEAM_MEMBERS,
+          yourName: c.name,
+          ...tableRules(team),
         },
       });
     }
@@ -485,6 +629,7 @@ export function startServer(port = 8790, {
           heroes, allPicked,
           isOwner: id === team.ownerId,
           deadline: Math.max(0, Math.ceil(team.pickLeft || 0)),
+          ...tableRules(team),
         },
       });
     }
@@ -545,8 +690,10 @@ export function startServer(port = 8790, {
 
   function snapshot(game) {
     const e = game.engine;
+    const tableSize = SUPPORTED_TABLE_SIZE_SET.has(e.tableSize)
+      ? e.tableSize : tableSizeOf(game);
     const players = [];
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= tableSize; i++) {
       const p = e.players[i];
       players.push({
         seat: i, hp: p.hp, energy: p.energy,
@@ -562,7 +709,9 @@ export function startServer(port = 8790, {
     const board = [];
     for (let i = 0; i < e.revealed; i++) board.push(cardJ(e.board[i]));
     return {
-      round: e.round, street: e.street, pot: e.totalPot(), potDisplay: e.getPotDisplay(true),
+      tableSize,
+      round: e.round, street: e.street, dealerIdx: e.dealerIdx,
+      pot: e.totalPot(), potDisplay: e.getPotDisplay(true),
       actingIdx: e.actingIdx || 0,
       waitingIdx: e.waitingIdx,
       actionClock: actionClockPayload(game),
@@ -575,6 +724,68 @@ export function startServer(port = 8790, {
     if (m?.connected && clients.get(m.id) === m) send(m, obj);
   }
 
+  function markPublicHole(game, seat, hole, cardIndex = null) {
+    if (!game.publicHoleBySeat) game.publicHoleBySeat = new Map();
+    const current = game.publicHoleBySeat.get(seat) || [null, null];
+    if (cardIndex == null) {
+      current[0] = hole?.[0] ? cardJ(hole[0]) : null;
+      current[1] = hole?.[1] ? cardJ(hole[1]) : null;
+    } else if (cardIndex === 1 || cardIndex === 2) {
+      const card = Array.isArray(hole) ? hole[cardIndex - 1] : hole;
+      current[cardIndex - 1] = card ? cardJ(card) : null;
+    }
+    game.publicHoleBySeat.set(seat, current);
+  }
+
+  function recordSettledHand(team, resolution, netResult = {}, wonAmount = {}, pots = []) {
+    const game = team?.game;
+    const e = game?.engine;
+    if (!game || !e || game.recordedRounds?.has(e.round)) return;
+    const participantSeats = game.handSeats?.size
+      ? [...game.handSeats]
+      : e.players.slice(1).filter((player) => player.hole?.length === 2).map((player) => player.idx);
+    const players = participantSeats.map((seat) => {
+      const player = e.players[seat];
+      const member = game.seatToClient.get(seat);
+      const publicHole = game.publicHoleBySeat?.get(seat) || [null, null];
+      return {
+        seat,
+        playerId: member?.playerId || null,
+        playerName: player.playerName || player.hero.name,
+        heroId: player.hero.id,
+        hole: player.hole.map(cardJ),
+        publicHole,
+        folded: player.folded,
+        allIn: player.allIn,
+        netResult: Number(netResult[seat]) || 0,
+        wonAmount: Math.max(0, Number(wonAmount[seat]) || 0),
+        handName: player.showdownInfo?.name || null,
+      };
+    });
+    if (!players.some((player) => player.playerId)) return;
+    try {
+      playerStore.recordHandHistory({
+        matchId: game.matchId,
+        round: e.round,
+        roomId: team.id,
+        roomName: team.name,
+        tableSize: game.tableSize,
+        dealerSeat: e.dealerIdx,
+        resolution,
+        board: e.board.slice(0, e.revealed).map(cardJ),
+        pots: (pots || []).map((pot) => ({
+          label: pot.label || '底池',
+          amount: Math.max(0, Number(pot.amount) || 0),
+          winnerSeats: (pot.winnerIds || []).map(Number),
+        })),
+        players,
+      });
+      game.recordedRounds.add(e.round);
+    } catch (error) {
+      console.error(`[Server] 牌局记录写入失败 match=${game.matchId} round=${e.round}`, error);
+    }
+  }
+
   function wireGame(team) {
     const game = team.game;
     const L = game.listeners;
@@ -585,6 +796,10 @@ export function startServer(port = 8790, {
     L.onRoundStart = (round, blinds, dealerIdx) => {
       clearActionClock(game);
       game.allInReveal = null;
+      game.lastShowdown = null;
+      game.publicHoleBySeat = new Map();
+      game.publicRevealEvents = [];
+      game.handSeats = new Set(e.currentHandSeats || e.activePlayers().map((player) => player.idx));
       game.pokerTracker.onRoundStart(
         round,
         [...game.seatToClient.keys()].filter((seat) => e.players[seat]?.alive),
@@ -663,10 +878,24 @@ export function startServer(port = 8790, {
     L.onQuote = (idx, text) => fwd('onQuote', { idx, text });
     L.onSkillResult = (idx, result) =>
       sendToSeat(game, idx, { ev: 'onSkillResult', a: { idx, result: skillResultJ(result) } });
-    L.onSkillPublicResult = (idx, result) =>
-      fwd('onSkillPublicResult', { idx, result: skillResultJ(result) });
+    L.onSkillPublicResult = (idx, result) => {
+      const serialized = skillResultJ(result);
+      if (result?.kind === 'reveal_self' && result.card && (result.cardIdx === 1 || result.cardIdx === 2)) {
+        markPublicHole(game, idx, result.card, result.cardIdx);
+        game.publicRevealEvents.push({ idx, result: serialized });
+      }
+      fwd('onSkillPublicResult', { idx, result: serialized });
+    };
     L.onPotAwarded = (winners, amount, uncontested, bonus, netWinnings) => {
       clearActionClock(game);
+      if (uncontested) {
+        const wonAmount = Object.fromEntries((winners || []).map((seat) => [
+          Number(seat), Math.max(0, Number(amount) + Number(bonus || 0)) / Math.max(1, winners.length),
+        ]));
+        recordSettledHand(team, 'uncontested', netWinnings, wonAmount, [{
+          label: '主池', amount: Math.max(0, Number(amount) + Number(bonus || 0)), winnerIds: winners,
+        }]);
+      }
       fwd('onPotAwarded', { winners, amount, uncontested, bonus, netWinnings });
     };
     L.onAllInReveal = (entrants) => {
@@ -675,6 +904,7 @@ export function startServer(port = 8790, {
           seat: p.idx, hole: [cardJ(p.hole[0]), cardJ(p.hole[1])],
         })),
       };
+      for (const player of entrants) markPublicHole(game, player.idx, player.hole);
       game.allInReveal = payload;
       fwd('onAllInReveal', payload);
     };
@@ -694,14 +924,14 @@ export function startServer(port = 8790, {
         score: p.showdownInfo.score,
         betRound: p.betRound,
       }));
-      broadcastTeam(team, {
-        ev: 'onShowdown',
-        a: {
-          entrants, won: data.wonAmount, net: data.netResult,
-          totalPot: data.totalPot, pots: data.pots || [],
-        },
-        s: snapshot(game),
-      });
+      for (const player of data.entrants) markPublicHole(game, player.idx, player.hole);
+      recordSettledHand(team, 'showdown', data.netResult, data.wonAmount, data.pots || []);
+      const payload = {
+        entrants, won: data.wonAmount, net: data.netResult,
+        totalPot: data.totalPot, pots: data.pots || [],
+      };
+      game.lastShowdown = payload;
+      broadcastTeam(team, { ev: 'onShowdown', a: payload, s: snapshot(game) });
     };
     L.onDeath = (idx) => fwd('onDeath', { idx });
     L.onRoundEnd = (round) => {
@@ -734,6 +964,7 @@ export function startServer(port = 8790, {
         try {
           storedProfiles = playerStore.recordGame({
             matchId: game.matchId,
+            tableSize: game.tableSize,
             results: persistentResults,
             hands: game.pokerTracker.getHands(),
           }).profiles;
@@ -749,8 +980,8 @@ export function startServer(port = 8790, {
           hp: p.hp, alive: p.alive, deathRound: p.deathRound ?? null,
           seat: p.idx, isMe: p.idx === seat,
         }));
-        m.pendingResult = { ranking: arr, mySeat: seat };
-        send(m, { ev: 'onGameOver', a: { ranking: arr } });
+        m.pendingResult = { ranking: arr, mySeat: seat, tableSize: game.tableSize };
+        send(m, { ev: 'onGameOver', a: { ranking: arr, tableSize: game.tableSize } });
       }
       team.phase = 'lobby';
       team.picks = {};
@@ -770,6 +1001,7 @@ export function startServer(port = 8790, {
   }
 
   function startGame(team) {
+    const tableSize = tableSizeOf(team);
     const humanSeats = new Set();
     const names = {};
     const heroIds = [];
@@ -780,7 +1012,7 @@ export function startServer(port = 8790, {
       const c = clients.get(id);
       const seat = i + 1;
       humanSeats.add(seat);
-      names[seat] = c.name;
+      names[seat] = c.playerProfile?.nickname || c.name;
       heroIds[i] = team.picks[id];
       usedHero.add(heroIds[i]);
       c.seat = seat;
@@ -788,15 +1020,19 @@ export function startServer(port = 8790, {
       seatToClient.set(seat, c);
     });
     const pool = shuffle(HEROES.filter((hh) => !usedHero.has(hh.id)).map((hh) => hh.id));
-    for (let i = team.members.length; i < Config.PLAYER_COUNT; i++) {
+    const aiCount = tableSize - team.members.length;
+    if (pool.length < aiCount) {
+      throw new Error(`Not enough unique heroes for ${tableSize}-seat table`);
+    }
+    for (let i = team.members.length; i < tableSize; i++) {
       heroIds[i] = pool.pop();
       names[i + 1] = 'AI·' + (getHero(heroIds[i])?.name || '无名');
     }
 
     const listeners = {};
-    const engine = new Engine(heroIds, listeners, humanSeats, names);
+    const engine = new Engine(heroIds, listeners, humanSeats, names, { tableSize });
     const ps = [];
-    for (let i = 1; i <= Config.PLAYER_COUNT; i++) {
+    for (let i = 1; i <= tableSize; i++) {
       const isHuman = humanSeats.has(i);
       const member = isHuman ? seatToClient.get(i) : null;
       ps.push({
@@ -816,17 +1052,19 @@ export function startServer(port = 8790, {
       [...seatToClient].map(([seat, member]) => [seat, member.playerId]),
     );
     team.game = {
-      engine, listeners, seatToClient, players: ps, matchId: randomUUID(), pokerTracker,
+      engine, listeners, seatToClient, players: ps, matchId: randomUUID(), pokerTracker, tableSize,
       awaitSeat: null, awaitLeft: 0, awaitTotal: 0, lastOpts: null, allInReveal: null,
+      lastShowdown: null, publicHoleBySeat: new Map(), publicRevealEvents: [],
+      handSeats: new Set(), recordedRounds: new Set(),
       actionClockSeq: 0, actionClock: null,
     };
     team.phase = 'playing';
     wireGame(team);
 
     for (const [seat, m] of seatToClient) {
-      send(m, { ev: 'gameStart', a: { mySeat: seat, players: ps } });
+      send(m, { ev: 'gameStart', a: { mySeat: seat, players: ps, tableSize } });
     }
-    console.log(`[Server] 队伍 ${team.name} 开局：${team.members.length} 真人 + ${Config.PLAYER_COUNT - team.members.length} AI`);
+    console.log(`[Server] 队伍 ${team.name} 开局：${team.members.length} 真人 + ${aiCount} AI（${tableSize} 人桌）`);
     engine.startGame();
     broadcastLobby();
   }
@@ -846,14 +1084,19 @@ export function startServer(port = 8790, {
       const game = team.game;
       send(client, {
         ev: 'gameStart',
-        a: { mySeat: client.seat, players: game.players },
+        a: { mySeat: client.seat, players: game.players, tableSize: game.tableSize },
       });
       send(client, { ev: 'sync', a: {}, s: snapshot(game) });
       const hole = game.engine.players[client.seat]?.hole || [];
       if (hole.length >= 2) {
         send(client, { ev: 'hole', a: { hole: [cardJ(hole[0]), cardJ(hole[1])] } });
       }
-      if (game.allInReveal) {
+      for (const reveal of game.publicRevealEvents || []) {
+        send(client, { ev: 'onSkillPublicResult', a: reveal, s: snapshot(game) });
+      }
+      if (game.lastShowdown) {
+        send(client, { ev: 'onShowdown', a: game.lastShowdown, s: snapshot(game) });
+      } else if (game.allInReveal) {
         send(client, { ev: 'onAllInReveal', a: game.allInReveal, s: snapshot(game) });
       }
       if (game.awaitSeat === client.seat && game.lastOpts) {
@@ -906,39 +1149,59 @@ export function startServer(port = 8790, {
     broadcastLobby();
   }
 
+  function invalidateClientAuth(client, code = ERROR_CODES.AUTH_SESSION_INVALID) {
+    if (!client) return;
+    const ws = client.ws;
+    if (client.connected) fail(client, code, '登录状态已失效，请重新登录');
+    client.connected = false;
+    client.ws = null;
+    client.isAlive = false;
+    client.authSessionHash = null;
+    expireClient(client);
+    if (ws?.readyState < 2) {
+      try { ws.close(4001, code); } catch { ws.terminate(); }
+    }
+  }
+
+  authHttpHandler = createAuthHttpHandler({
+    playerStore,
+    mailer,
+    trustedOrigins: allowedOrigins,
+    cookieSecure,
+    rateLimitMultiplier: authRateLimitMultiplier,
+    onProfileUpdated(profile) {
+      publishProfileState(profile, { notify: true, saved: true });
+    },
+    onSessionRevoked(sessionHash) {
+      if (!sessionHash) return;
+      for (const client of [...clients.values()]) {
+        if (client.authSessionHash === sessionHash) invalidateClientAuth(client);
+      }
+    },
+    onAccountSessionsRevoked(playerId) {
+      if (!playerId) return;
+      for (const client of [...clients.values()]) {
+        if (client.playerId === playerId) invalidateClientAuth(client);
+      }
+    },
+  });
+
   // ---------------- 客户端命令 ----------------
 
   function handleCmd(client, msg) {
     const cmd = msg.cmd;
 
+    if (cmd === 'hello') return;
+
     if (cmd === 'resume') {
       return fail(client, ERROR_CODES.SESSION_ALREADY_INITIALIZED, '当前连接已建立会话');
 
+    } else if (!client.playerId || !client.authSessionHash
+      || (client.authExpiresAt != null && client.authExpiresAt <= Date.now())) {
+      return fail(client, ERROR_CODES.AUTH_REQUIRED, '联机模式需要先登录');
+
     } else if (cmd === 'identify') {
-      const guestHash = guestFingerprint(msg.guestId);
-      if (client.guestHash && client.guestHash !== guestHash) {
-        return fail(client, ERROR_CODES.PLAYER_ALREADY_IDENTIFIED, '当前连接已绑定其他玩家身份');
-      }
-      const identity = playerStore.identify({
-        guestId: msg.guestId,
-        nickname: msg.nickname,
-        emblem: msg.emblem,
-        fallbackNickname: [...client.name].slice(0, 8).join(''),
-      });
-      if (client.playerId && client.playerId !== identity.profile.playerId) {
-        return fail(client, ERROR_CODES.PLAYER_ALREADY_IDENTIFIED, '当前连接已绑定其他玩家身份');
-      }
-      client.playerId = identity.profile.playerId;
-      client.guestHash = identity.guestHash;
-      client.playerProfile = identity.profile;
-      client.name = identity.profile.nickname;
-      const affectedTeamIds = applyPlayerProfile(identity.profile);
-      sendPlayerProfile(client, identity.profile);
-      for (const teamId of affectedTeamIds) {
-        const team = teams.get(teamId);
-        if (team) sendTeamState(team);
-      }
-      broadcastLobby();
+      return fail(client, ERROR_CODES.PLAYER_ALREADY_IDENTIFIED, '当前连接已由登录会话绑定');
 
     } else if (cmd === 'updateProfile') {
       if (!client.playerId) {
@@ -956,11 +1219,16 @@ export function startServer(port = 8790, {
         return fail(client, ERROR_CODES.ROOM_LIMIT_REACHED,
           '队伍数量已达上限，请加入现有队伍');
       }
+      const tableSize = msg.tableSize ?? DEFAULT_TABLE_SIZE;
+      if (!clientSupportsTableSize(client, tableSize)) {
+        return fail(client, ERROR_CODES.CLIENT_UPGRADE_REQUIRED, '当前客户端不支持 9 人桌，请升级后重试');
+      }
       const team = {
         id: nextTeamId,
         name: TEAM_NAME_POOL[Math.floor(Math.random() * TEAM_NAME_POOL.length)] + '·' + nextTeamId,
         ownerId: client.id,
         members: [client.id],
+        tableSize,
         phase: 'lobby',
         picks: {},
         game: null,
@@ -978,7 +1246,11 @@ export function startServer(port = 8790, {
       if (team.phase !== 'lobby') {
         return fail(client, ERROR_CODES.ROOM_NOT_JOINABLE, '该队伍已开局');
       }
-      if (team.members.length >= MAX_TEAM_MEMBERS) {
+      const tableSize = tableSizeOf(team);
+      if (!clientSupportsTableSize(client, tableSize)) {
+        return fail(client, ERROR_CODES.CLIENT_UPGRADE_REQUIRED, '当前客户端不支持该桌型，请升级后重试');
+      }
+      if (team.members.length >= tableSize) {
         return fail(client, ERROR_CODES.ROOM_FULL, '该队伍已满员');
       }
       team.members.push(client.id);
@@ -1013,6 +1285,9 @@ export function startServer(port = 8790, {
       if (!team) return fail(client, ERROR_CODES.NOT_IN_ROOM, '当前不在队伍中');
       if (team.ownerId !== client.id) return fail(client, ERROR_CODES.NOT_ROOM_OWNER, '只有房主可以开始选将');
       if (team.phase !== 'lobby') return fail(client, ERROR_CODES.INVALID_ROOM_PHASE, '当前阶段不能开始选将');
+      if (team.members.length < 1 || team.members.length > tableSizeOf(team)) {
+        return fail(client, ERROR_CODES.INVALID_ROOM_PHASE, '房间真人席位数量无效');
+      }
       if (hasOfflineMember(team)) {
         return fail(client, ERROR_CODES.ROOM_MEMBER_OFFLINE, '有队员离线，暂时不能开始选将');
       }
@@ -1050,7 +1325,28 @@ export function startServer(port = 8790, {
             '还有队友未选定英雄');
         }
       }
+      const selectedHeroes = team.members.map((id) => team.picks[id]);
+      if (new Set(selectedHeroes).size !== selectedHeroes.length) {
+        return fail(client, ERROR_CODES.HERO_TAKEN, '同桌英雄不能重复');
+      }
+      if (HEROES.length < tableSizeOf(team)) {
+        return fail(client, ERROR_CODES.INTERNAL_ERROR, '英雄池不足，无法为该桌型补位');
+      }
       startGame(team);
+
+    } else if (cmd === 'chat') {
+      const team = client.teamId ? teams.get(client.teamId) : null;
+      if (!team) return fail(client, ERROR_CODES.NOT_IN_ROOM, '当前不在队伍中');
+      const text = String(msg.text || '').trim().normalize('NFC');
+      broadcastTeam(team, {
+        ev: 'chat',
+        a: {
+          seat: client.seat || null,
+          name: client.name,
+          text,
+          ts: Date.now(),
+        },
+      });
 
     } else if (cmd === 'act') {
       const team = client.teamId ? teams.get(client.teamId) : null;
@@ -1085,7 +1381,9 @@ export function startServer(port = 8790, {
       const selection = {};
       if (typeof raw.choice === 'string' || Number.isInteger(raw.choice)) selection.choice = raw.choice;
       if (Number.isInteger(raw.targetIdx)) {
-        if (raw.targetIdx < 1 || raw.targetIdx > Config.PLAYER_COUNT) {
+        const tableSize = SUPPORTED_TABLE_SIZE_SET.has(game.engine.tableSize)
+          ? game.engine.tableSize : tableSizeOf(game);
+        if (raw.targetIdx < 1 || raw.targetIdx > tableSize) {
           return fail(client, ERROR_CODES.INVALID_FIELD, '技能目标座位无效');
         }
         selection.targetIdx = raw.targetIdx;
@@ -1138,17 +1436,35 @@ export function startServer(port = 8790, {
 
   // ---------------- 连接生命周期 ----------------
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, request) => {
     if (closing) {
       ws.close(1012, ERROR_CODES.SERVER_SHUTTING_DOWN);
       return;
     }
+    const requestOrigin = String(request?.headers?.origin || '');
+    let sameOrigin = false;
+    try {
+      sameOrigin = Boolean(request?.headers?.host)
+        && new URL(requestOrigin).host.toLowerCase()
+          === String(request.headers.host).toLowerCase();
+    } catch { /* invalid or absent origin */ }
+    if (requestOrigin && !sameOrigin && !isTrustedOrigin(requestOrigin, allowedOrigins)) {
+      ws.close(4003, 'ORIGIN_NOT_ALLOWED');
+      return;
+    }
+    const rawAuthToken = authTokenFromRequest(request);
+    const resolvedAuth = rawAuthToken
+      ? playerStore.resolveAuthSession(rawAuthToken, { touch: true })
+      : null;
+    const auth = resolvedAuth
+      ? { ...resolvedAuth, sessionHash: authSessionHash(rawAuthToken) }
+      : null;
     let client = null;
     let initialized = false;
     const finishNewSession = () => {
       if (initialized || ws.readyState !== 1) return client;
       initialized = true;
-      client = createClient(ws);
+      client = createClient(ws, null, auth);
       return client;
     };
     const handshakeTimer = setTimeout(finishNewSession, SESSION_HANDSHAKE_MS);
@@ -1173,9 +1489,15 @@ export function startServer(port = 8790, {
       if (!initialized) {
         clearTimeout(handshakeTimer);
         initialized = true;
-        if (msg.cmd === 'resume') client = resumeClient(ws, msg.resumeToken) || createClient(ws);
-        else client = createClient(ws);
-        if (msg.cmd === 'resume') return;
+        if (msg.cmd === 'resume') {
+          const resumed = resumeClient(ws, msg.resumeToken, msg, auth);
+          if (resumed === RESUME_REJECTED) return;
+          client = resumed || createClient(ws, msg, auth);
+          return;
+        }
+        client = createClient(ws, msg, auth);
+      } else {
+        applyClientMetadata(client, msg);
       }
       try {
         handleCmd(client, msg);
@@ -1280,6 +1602,13 @@ export function startServer(port = 8790, {
     closePlayerStore();
     console.error('[Server] WebSocket 服务错误', err);
   });
+  httpServer.on('error', (err) => {
+    stopTimers();
+    closePlayerStore();
+    console.error('[Server] HTTP 服务错误', err);
+  });
+
+  httpServer.listen(port);
 
   let closePromise = null;
   const close = () => {
@@ -1295,17 +1624,24 @@ export function startServer(port = 8790, {
         closePlayerStore();
         resolve();
       };
+      const closeHttp = () => {
+        if (!httpServer.listening) {
+          finish();
+          return;
+        }
+        try { httpServer.close(finish); } catch { finish(); }
+      };
       try {
-        wss.close(finish);
+        wss.close(closeHttp);
       } catch {
-        finish();
+        closeHttp();
       }
       for (const ws of wss.clients) {
         try { ws.close(1001, 'SERVER_SHUTDOWN'); } catch { ws.terminate(); }
       }
       forceTimer = setTimeout(() => {
         for (const ws of wss.clients) ws.terminate();
-        finish();
+        closeHttp();
       }, shutdownGrace);
       forceTimer.unref?.();
     });
@@ -1317,9 +1653,12 @@ export function startServer(port = 8790, {
 
   return {
     wss,
+    httpServer,
     ready,
     close,
     playerStore,
+    mailer,
+    mailOutbox: mailer?.outbox || [],
   };
 }
 

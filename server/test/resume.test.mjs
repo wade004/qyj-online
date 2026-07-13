@@ -4,7 +4,8 @@ import { once } from 'node:events';
 import WebSocket from 'ws';
 
 import { startServer } from '../server.mjs';
-import { ERROR_CODES } from '../protocol.mjs';
+import { ERROR_CODES, PROTOCOL_VERSION } from '../protocol.mjs';
+import { registerTestAccount, withAuthCookie } from './auth-test-helpers.mjs';
 
 const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error(`${label} 超时`)), ms);
@@ -24,8 +25,15 @@ async function openServer(options = {}) {
   return { server, port: server.wss.address().port };
 }
 
-async function connect(port, { resumeToken, silent = false } = {}) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+async function connect(server, port, {
+  resumeToken,
+  silent = false,
+  supportsNine = true,
+  cookie: suppliedCookie,
+} = {}) {
+  const account = suppliedCookie ? null : await registerTestAccount(server);
+  const cookie = suppliedCookie || account.cookie;
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`, withAuthCookie(cookie));
   const inbox = [];
   const history = [];
   const waiters = [];
@@ -61,9 +69,14 @@ async function connect(port, { resumeToken, silent = false } = {}) {
     },
   };
   await withTimeout(once(ws, 'open'), 2_000, '连接');
-  if (resumeToken) client.send({ cmd: 'resume', resumeToken });
-  else if (!silent) client.send({ cmd: 'lobby' });
+  const metadata = supportsNine
+    ? { protocolVersion: PROTOCOL_VERSION, capabilities: ['table-size-9'] }
+    : {};
+  if (resumeToken) client.send({ cmd: 'resume', resumeToken, ...metadata });
+  else if (!silent) client.send({ cmd: 'lobby', ...metadata });
   client.session = await client.waitFor((msg) => msg.ev === 'session', 'session');
+  client.cookie = cookie;
+  client.account = account;
   return client;
 }
 
@@ -76,8 +89,9 @@ async function closeSocket(ws) {
 
 test('无首条消息的旧客户端在握手期后获得 session 与 lobby', async () => {
   const { server, port } = await openServer();
+  const account = await registerTestAccount(server);
   const startedAt = Date.now();
-  const client = await connect(port, { silent: true });
+  const client = await connect(server, port, { silent: true, cookie: account.cookie });
   try {
     await client.waitFor((msg) => msg.ev === 'lobby', '旧客户端大厅');
     assert.equal(client.history[0].ev, 'session');
@@ -89,22 +103,37 @@ test('无首条消息的旧客户端在握手期后获得 session 与 lobby', as
   }
 });
 
-test('对局中恢复原座位与暗牌并轮换 resumeToken', async () => {
+test('9 人桌对局中恢复原座位、桌型与暗牌并轮换 resumeToken', async () => {
   const { server, port } = await openServer({ speed: 10, resumeGraceMs: 2_000 });
   const sockets = [];
   try {
-    const a = await connect(port); sockets.push(a.ws);
-    const b = await connect(port); sockets.push(b.ws);
+    const a = await connect(server, port); sockets.push(a.ws);
+    const b = await connect(server, port); sockets.push(b.ws);
     const originalToken = a.session.a.resumeToken;
     assert.equal(a.session.a.resumed, false);
     assert.equal(a.session.a.resumeGraceMs, 2_000);
+    assert.equal(a.session.a.protocolVersion, PROTOCOL_VERSION);
+    assert.deepEqual(a.session.a.supportedTableSizes, [6, 9]);
 
-    a.send({ cmd: 'create' });
+    a.send({ cmd: 'create', tableSize: 9 });
     const room = await a.waitFor((msg) => msg.ev === 'team' && msg.a.members.length === 1, '创建房间');
+    assert.equal(room.a.tableSize, 9);
+    assert.equal(room.a.maxMembers, 9);
+    assert.equal(room.a.totalPlayers, 9);
+    const listed = await b.waitFor(
+      (msg) => msg.ev === 'lobby' && msg.a.teams.some((team) => team.id === room.a.id),
+      '大厅展示 9 人桌',
+    );
+    const listedRoom = listed.a.teams.find((team) => team.id === room.a.id);
+    assert.equal(listedRoom.tableSize, 9);
+    assert.equal(listedRoom.maxMembers, 9);
+    assert.equal(listedRoom.totalPlayers, 9);
     b.send({ cmd: 'join', teamId: room.a.id });
     await b.waitFor((msg) => msg.ev === 'team' && msg.a.members.length === 2, '加入房间');
     a.send({ cmd: 'startPick' });
-    await a.waitFor((msg) => msg.ev === 'pick', '进入选将');
+    const picking = await a.waitFor((msg) => msg.ev === 'pick', '进入选将');
+    assert.equal(picking.a.tableSize, 9);
+    assert.equal(picking.a.maxMembers, 9);
     a.send({ cmd: 'pick', heroId: 'xiangyu' });
     b.send({ cmd: 'pick', heroId: 'diaochan' });
     await a.waitFor((msg) => msg.ev === 'pick' && msg.a.allPicked, '完成选将');
@@ -112,6 +141,9 @@ test('对局中恢复原座位与暗牌并轮换 resumeToken', async () => {
     const firstStart = await a.waitFor((msg) => msg.ev === 'gameStart', '首次 gameStart');
     const firstHole = await a.waitFor((msg) => msg.ev === 'hole', '首次暗牌');
     const originalSeat = firstStart.a.mySeat;
+    assert.equal(firstStart.a.tableSize, 9);
+    assert.equal(firstStart.a.players.length, 9);
+    assert.equal(new Set(firstStart.a.players.map((player) => player.heroId)).size, 9);
 
     a.inbox.length = 0;
     b.inbox.length = 0;
@@ -122,16 +154,23 @@ test('对局中恢复原座位与暗牌并轮换 resumeToken', async () => {
     assert.equal(offlineTeam.a.members.find((member) => !member.isYou).isOwner, true,
       '房主在宽限期内必须保留身份');
 
-    const resumed = await connect(port, { resumeToken: originalToken }); sockets.push(resumed.ws);
+    const resumed = await connect(server, port, {
+      resumeToken: originalToken,
+      cookie: a.cookie,
+    }); sockets.push(resumed.ws);
     assert.equal(resumed.session.a.resumed, true);
     assert.notEqual(resumed.session.a.resumeToken, originalToken, '恢复后必须轮换 token');
     const resumedStart = await resumed.waitFor((msg) => msg.ev === 'gameStart', '恢复 gameStart');
     const resumedSync = await resumed.waitFor((msg) => msg.ev === 'sync' && msg.s, '恢复快照');
     const resumedHole = await resumed.waitFor((msg) => msg.ev === 'hole', '恢复暗牌');
     assert.equal(resumedStart.a.mySeat, originalSeat);
+    assert.equal(resumedStart.a.tableSize, 9);
+    assert.equal(resumedStart.a.players.length, 9);
+    assert.equal(resumedSync.s.tableSize, 9);
+    assert.equal(resumedSync.s.players.length, 9);
     assert.deepEqual(resumedHole.a.hole, firstHole.a.hole);
     assert.ok(Number.isInteger(resumedSync.s.actingIdx)
-      && resumedSync.s.actingIdx >= 0 && resumedSync.s.actingIdx <= 6,
+      && resumedSync.s.actingIdx >= 0 && resumedSync.s.actingIdx <= 9,
     '恢复快照应携带权威的当前行动者索引');
     assert.ok(Object.hasOwn(resumedSync.s, 'actionClock'),
       '恢复快照必须显式携带公开行动时钟或 null，避免客户端残留旧倒计时');
@@ -154,7 +193,10 @@ test('对局中恢复原座位与暗牌并轮换 resumeToken', async () => {
       && msg.a.members.every((member) => member.connected), '恢复在线状态');
     assert.equal(onlineTeam.a.members.length, 2);
 
-    const staleToken = await connect(port, { resumeToken: originalToken }); sockets.push(staleToken.ws);
+    const staleToken = await connect(server, port, {
+      resumeToken: originalToken,
+      cookie: a.cookie,
+    }); sockets.push(staleToken.ws);
     assert.equal(staleToken.session.a.resumed, false, '旧 token 不得再次恢复原会话');
   } finally {
     await Promise.all(sockets.map((ws) => closeSocket(ws).catch(() => {})));
@@ -166,9 +208,12 @@ test('新连接替换旧 socket 时旧 close 不会把会话再次标离线', as
   const { server, port } = await openServer({ resumeGraceMs: 2_000 });
   const sockets = [];
   try {
-    const original = await connect(port); sockets.push(original.ws);
+    const original = await connect(server, port); sockets.push(original.ws);
     const oldClosed = once(original.ws, 'close');
-    const replacement = await connect(port, { resumeToken: original.session.a.resumeToken });
+    const replacement = await connect(server, port, {
+      resumeToken: original.session.a.resumeToken,
+      cookie: original.cookie,
+    });
     sockets.push(replacement.ws);
     assert.equal(replacement.session.a.resumed, true);
     const [closeCode] = await withTimeout(oldClosed, 1_000, '旧连接替换关闭');
@@ -188,8 +233,8 @@ test('离线成员阻止开局并在宽限期后清退', async () => {
   const { server, port } = await openServer({ resumeGraceMs: 80 });
   const sockets = [];
   try {
-    const owner = await connect(port); sockets.push(owner.ws);
-    const member = await connect(port); sockets.push(member.ws);
+    const owner = await connect(server, port); sockets.push(owner.ws);
+    const member = await connect(server, port); sockets.push(member.ws);
     const expiredToken = member.session.a.resumeToken;
     owner.send({ cmd: 'create' });
     const room = await owner.waitFor((msg) => msg.ev === 'team' && msg.a.members.length === 1, '创建房间');
@@ -210,7 +255,10 @@ test('离线成员阻止开局并在宽限期后清退', async () => {
     owner.send({ cmd: 'startPick' });
     await owner.waitFor((msg) => msg.ev === 'pick', '清退后选将');
 
-    const expired = await connect(port, { resumeToken: expiredToken }); sockets.push(expired.ws);
+    const expired = await connect(server, port, {
+      resumeToken: expiredToken,
+      cookie: member.cookie,
+    }); sockets.push(expired.ws);
     assert.equal(expired.session.a.resumed, false, '过期 token 不得恢复');
   } finally {
     await Promise.all(sockets.map((ws) => closeSocket(ws).catch(() => {})));
@@ -222,8 +270,8 @@ test('选将阶段离线成员阻止开战，过期后可继续', async () => {
   const { server, port } = await openServer({ resumeGraceMs: 80 });
   const sockets = [];
   try {
-    const owner = await connect(port); sockets.push(owner.ws);
-    const member = await connect(port); sockets.push(member.ws);
+    const owner = await connect(server, port); sockets.push(owner.ws);
+    const member = await connect(server, port); sockets.push(member.ws);
     owner.send({ cmd: 'create' });
     const room = await owner.waitFor((msg) => msg.ev === 'team' && msg.a.members.length === 1, '创建房间');
     member.send({ cmd: 'join', teamId: room.a.id });
@@ -256,7 +304,7 @@ test('结算后未回房的会话恢复为 resumeResult', async () => {
   const { server, port } = await openServer({ speed: 100, resumeGraceMs: 2_000 });
   const sockets = [];
   try {
-    const player = await connect(port); sockets.push(player.ws);
+    const player = await connect(server, port); sockets.push(player.ws);
     const token = player.session.a.resumeToken;
     player.ws.on('message', (raw) => {
       const msg = JSON.parse(raw.toString());
@@ -272,12 +320,17 @@ test('结算后未回房的会话恢复为 resumeResult', async () => {
     player.send({ cmd: 'startGame' });
     const started = await player.waitFor((msg) => msg.ev === 'gameStart', '单人开局');
     const over = await player.waitFor((msg) => msg.ev === 'onGameOver', '对局结算', 30_000);
+    assert.equal(over.a.tableSize, 6);
     await closeSocket(player.ws);
 
-    const resumed = await connect(port, { resumeToken: token }); sockets.push(resumed.ws);
+    const resumed = await connect(server, port, {
+      resumeToken: token,
+      cookie: player.cookie,
+    }); sockets.push(resumed.ws);
     assert.equal(resumed.session.a.resumed, true);
     const result = await resumed.waitFor((msg) => msg.ev === 'resumeResult', '恢复结算');
     assert.equal(result.a.mySeat, started.a.mySeat);
+    assert.equal(result.a.tableSize, 6);
     assert.equal(result.a.ranking.length, 6);
     assert.equal(result.a.ranking.filter((item) => item.isMe).length, 1);
     assert.ok(result.a.ranking.every((item) => Object.hasOwn(item, 'deathRound')));
@@ -292,7 +345,7 @@ test('结算后未回房的会话恢复为 resumeResult', async () => {
 
 test('server.close 不等待保留中的恢复计时器', async () => {
   const { server, port } = await openServer({ resumeGraceMs: 90_000 });
-  const client = await connect(port);
+  const client = await connect(server, port);
   await closeSocket(client.ws);
   await withTimeout(server.close(), 500, '带保留会话关闭服务');
 });

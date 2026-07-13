@@ -14,16 +14,17 @@ export function createDeck() {
 }
 
 /** Fisher-Yates 洗牌（原地） */
-export function shuffle(arr) {
+export function shuffle(arr, rng = Math.random) {
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const value = Math.max(0, Math.min(1 - Number.EPSILON, Number(rng())));
+    const j = Math.floor(value * (i + 1));
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr;
 }
 
-export function newShuffledDeck() {
-  return shuffle(createDeck());
+export function newShuffledDeck(rng = Math.random) {
+  return shuffle(createDeck(), rng);
 }
 
 /** 从牌堆顶抽一张 */

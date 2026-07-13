@@ -1,5 +1,4 @@
 import { assertBattleEngineContract } from '../js/session/battle-session.js';
-import { createLocalBattleSession } from '../js/session/local-battle-session.js';
 import { createRemoteBattleSession } from '../js/session/remote-battle-session.js';
 import { createOnlineSession } from '../js/session/online-session.js';
 import { HEROES } from '../js/game/heroes.js';
@@ -14,12 +13,6 @@ const samplePokerStats = {
   hands: 42, confidence: 'medium', vpip: 31, pfr: 19, threeBet: 7.5,
   af: 2.1, wtsd: 28, wsd: 52, cbet: 61, foldToCbet: 44,
 };
-const local = createLocalBattleSession({ heroIds });
-assertBattleEngineContract(local.rawEngine, 'Engine');
-assert(local.kind === 'local', '本地 facade 类型');
-assert(local.players.length === 7, '本地 facade 透传 1-based 玩家数组');
-assert(local.currentBet === 0 && local.streetRaiseCount === 0, '本地查询字段');
-
 const startData = {
   mySeat: 1,
   players: heroIds.map((heroId, index) => ({
@@ -75,6 +68,8 @@ const playerSnapshot = (seat, betStreet = 0) => ({
   skillUsed: false,
   skillModifiers: [],
 });
+remote.players[2].hole = [{ rank: 14, suit: 1 }, { rank: 13, suit: 1 }];
+remote.players[2].showdownInfo = { name: '前局牌型', cat: 2, score: 1 };
 remote.onMessage({
   ev: 'onRoundStart',
   a: { round: 1, blinds: { sb: 10, bb: 20 }, dealerIdx: 4 },
@@ -91,6 +86,8 @@ remote.onMessage({
 });
 assert(remote.dealerIdx === 4, '旧协议可由 onRoundStart 补齐庄位');
 assert(remote.currentBet === 20, '旧协议可由玩家投入推导当前下注');
+assert(remote.players.slice(1).every((player) => player.hole.length === 0 && !player.showdownInfo),
+  '新一局必须清除上一局已公开的底牌和牌型，等待本人私有发牌或新的公开亮牌');
 
 remote.onMessage({
   ev: 'onTurnStart',
@@ -217,11 +214,23 @@ const online = createOnlineSession({
 });
 const states = [];
 online.subscribe((state) => states.push(state));
-assert(fakeClient.sent[0]?.cmd === 'lobby', '连接成功后请求大厅');
-fakeClient.message({ ev: 'session', a: { resumeToken: 'token-1', resumed: false, resumeGraceMs: 15000 } });
+assert(fakeClient.sent[0]?.cmd === 'hello', '连接成功后先请求登录会话');
+assert(fakeClient.sent[0]?.protocolVersion === 3
+  && fakeClient.sent[0]?.capabilities?.includes('table-size-9'),
+'首包必须声明 9 人桌能力');
+fakeClient.message({
+  ev: 'session',
+  a: {
+    resumeToken: 'token-1', resumed: false, resumeGraceMs: 15000,
+    protocolVersion: 3, supportedTableSizes: [6, 9], authenticated: true,
+    account: { username: 'contract_player', email: 'contract@example.com' },
+  },
+});
+assert(online.getState().supportedTableSizes.join(',') === '6,9',
+  '会话状态透传服务端支持桌型');
 assert([...resumeStorage.values.values()].includes('token-1'), '恢复令牌仅写入 sessionStorage');
-assert(fakeClient.sent.at(-1)?.cmd === 'identify'
-  && fakeClient.sent.at(-1)?.guestId === 'guest-contract-player-0001', '会话建立后绑定数据库玩家身份');
+assert(online.getState().authenticated
+  && online.getState().account?.username === 'contract_player', '会话由安全 Cookie 绑定联机账号');
 fakeClient.message({
   ev: 'playerProfile',
   a: {
@@ -240,6 +249,8 @@ assert(online.getState().player.playerId === 'QYJ-CONTRACT'
   && online.getState().profileSync === 'synced', '服务端玩家资料成为会话权威状态');
 fakeClient.message({ ev: 'lobby', a: { yourName: '契约玩家', teams: [] } });
 assert(online.getState().screen === 'lobby', '大厅状态');
+assert(online.createTeam(9) && fakeClient.sent.at(-1)?.tableSize === 9,
+  '创建 9 人桌命令透传 tableSize');
 const profileSave = online.updatePlayerProfile({ nickname: '新契约名', emblem: '月' });
 assert(fakeClient.sent.at(-1)?.cmd === 'updateProfile', '玩家资料更新走服务端命令');
 fakeClient.message({
@@ -289,6 +300,7 @@ fakeClient.message({ ev: 'gameStart', a: startData });
 assert(online.getState().screen === 'battle' && online.getState().battle?.kind === 'remote',
   '联机会话提供远程 BattleSession');
 const retainedBattle = online.getState().battle;
+retainedBattle.rawEngine.players[1].playerName = '无名侠客';
 retainedBattle.rawEngine.waitingIdx = 1;
 const sentBeforeDisconnect = fakeClient.sent.length;
 fakeClient.listener?.({ type: 'close', intentional: false });
@@ -302,9 +314,21 @@ online.reconnect();
 assert(fakeClient.sent.at(-1)?.cmd === 'resume' && fakeClient.sent.at(-1)?.resumeToken === 'token-1',
   '重连首条命令携带 sessionStorage 恢复令牌');
 assert(fakeClient.url === 'ws://contract.test', '恢复令牌不进入 URL');
-fakeClient.message({ ev: 'session', a: { resumeToken: 'token-2', resumed: true, resumeGraceMs: 15000 } });
+fakeClient.message({
+  ev: 'session',
+  a: {
+    resumeToken: 'token-2', resumed: true, resumeGraceMs: 15000, authenticated: true,
+    profile: {
+      playerId: 'QYJ-CONTRACT', shortId: 'C0DE', nickname: '阳顶天', emblem: '月',
+      stats: { matches: 5, wins: 2, top3: 4, bestRank: 1, winRate: 40 },
+      recentMatches: [], pokerStats: samplePokerStats,
+    },
+  },
+});
 fakeClient.message({ ev: 'gameStart', a: startData });
 assert(online.getState().battle === retainedBattle, '恢复 gameStart 复用原 battle facade');
+assert(retainedBattle.rawEngine.players[1].playerName === '阳顶天',
+  '恢复 gameStart 必须用权威玩家资料刷新旧 RemoteEngine 姓名');
 fakeClient.message({
   ev: 'sync', a: {},
   s: {
@@ -344,16 +368,18 @@ assert(online.getState().data.mySeat === 1 && online.getState().data.ranking.len
 fakeClient.listener?.({ type: 'close', intentional: false });
 online.reconnect();
 assert(fakeClient.sent.at(-1)?.resumeToken === 'token-2', '结算页使用轮换后的令牌恢复');
-fakeClient.message({ ev: 'session', a: { resumeToken: 'token-3', resumed: true, resumeGraceMs: 15000 } });
+  fakeClient.message({ ev: 'session', a: { resumeToken: 'token-3', resumed: true, resumeGraceMs: 15000, authenticated: true } });
 fakeClient.message({
   ev: 'resumeResult',
   a: {
     mySeat: 1,
+    tableSize: 9,
     ranking: [{ seat: 1, heroId: heroIds[0], name: '契约玩家', hp: 1500, alive: true, deathRound: null, isMe: true }],
   },
 });
 assert(online.getState().screen === 'result' && online.getState().data.ranking[0].idx === 1,
   'resumeResult 映射为现有结算模型');
+assert(online.getState().data.tableSize === 9, 'resumeResult 保留桌型');
 assert(online.backToRoom()
   && online.getState().screen === 'connecting'
   && online.getState().writeBlocked, '返回房间期间暂时阻断写操作');
@@ -369,7 +395,7 @@ assert(online.getState().screen === 'room' && !online.getState().writeBlocked,
 
 fakeClient.listener?.({ type: 'close', intentional: false });
 online.reconnect();
-fakeClient.message({ ev: 'session', a: { resumeToken: 'token-4', resumed: false, resumeGraceMs: 15000 } });
+  fakeClient.message({ ev: 'session', a: { resumeToken: 'token-4', resumed: false, resumeGraceMs: 15000, authenticated: true } });
 assert(online.getState().screen === 'connecting' && online.getState().battle === null,
   '服务端明确会话过期后才清理 battle');
 fakeClient.message({ ev: 'lobby', a: { yourName: '新会话玩家', teams: [] } });
@@ -380,6 +406,34 @@ assert(states.every((state, index) => index === 0 || state !== states[index - 1]
   '每次发布使用新状态对象');
 online.destroy();
 assert(fakeClient.closed && online.getState().screen === 'closed', '销毁会话关闭连接');
+
+let authGateClient;
+const authCalls = [];
+const authGateSession = createOnlineSession({
+  url: 'ws://auth-gate.test',
+  autoReconnect: false,
+  sessionStorage: new MemoryStorage(),
+  playerProfile: {
+    guestId: 'guest-auth-gate-0000001', nickname: '待登录联网玩家', emblem: '侠',
+  },
+  accountClient: {
+    async login(payload) {
+      authCalls.push(payload);
+      return { ok: true, data: { authenticated: true } };
+    },
+  },
+  clientFactory: (url) => (authGateClient = new FakeClient(url)),
+});
+authGateClient.message({
+  ev: 'session',
+  a: { resumeToken: null, resumed: false, authenticated: false, protocolVersion: 3 },
+});
+assert(authGateSession.getState().screen === 'auth'
+  && !authGateSession.getState().authenticated, '联机未登录时进入账号入口');
+await authGateSession.loginAccount({ identifier: 'hero@example.com', password: 'password-123' });
+assert(authCalls[0]?.identifier === 'hero@example.com'
+  && authGateClient.reconnected, '用户名或邮箱登录成功后重建联机连接');
+authGateSession.destroy();
 
 let retryClient;
 const retrySession = createOnlineSession({
@@ -392,7 +446,7 @@ retryClient.listener?.({ type: 'close', intentional: false });
 assert(retrySession.getState().connection === 'reconnecting', '断线进入自动重连状态');
 await new Promise((resolve) => setTimeout(resolve, 5));
 assert(retryClient.reconnected, '自动重连执行');
-retryClient.message({ ev: 'session', a: { resumeToken: 'retry-token', resumed: false } });
+retryClient.message({ ev: 'session', a: { resumeToken: 'retry-token', resumed: false, authenticated: true } });
 retryClient.message({ ev: 'lobby', a: { yourName: '重连玩家', teams: [] } });
 assert(retrySession.getState().connection === 'open', '自动重连后恢复可写状态');
 retrySession.destroy();
@@ -420,9 +474,9 @@ const privacySession = createOnlineSession({
   sessionStorage: throwingStorage,
   clientFactory: (url) => (privacyClient = new FakeClient(url)),
 });
-privacyClient.message({ ev: 'session', a: { resumeToken: 'private-token', resumed: false } });
+privacyClient.message({ ev: 'session', a: { resumeToken: 'private-token', resumed: false, authenticated: true } });
 privacyClient.message({ ev: 'lobby', a: { yourName: '隐私玩家', teams: [] } });
 assert(privacySession.getState().screen === 'lobby', '隐私模式拒绝 sessionStorage 时仍可使用');
 privacySession.destroy();
 
-console.log('BattleSession/OnlineSession 契约自检通过：本地/远程 facade、旧快照兼容与状态流正常');
+console.log('BattleSession/OnlineSession 契约自检通过：联网远程 facade、旧快照兼容与状态流正常');

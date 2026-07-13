@@ -1,6 +1,7 @@
 const STORAGE_KEY = 'qyj-player-profile-v2';
 const LEGACY_STORAGE_KEY = 'qyj-guest-profile-v1';
 const EMBLEMS = ['侠', '群', '墨', '月'];
+export const DEFAULT_PLAYER_NICKNAME = '无名侠客';
 
 function fallbackId() {
   const random = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
@@ -88,7 +89,7 @@ function normalize(raw = {}) {
     ? raw.guestId : makeId();
   const nickname = typeof raw.nickname === 'string' && raw.nickname.trim()
     ? [...raw.nickname.trim()].slice(0, 8).join('')
-    : '无名侠客';
+    : DEFAULT_PLAYER_NICKNAME;
   const emblem = EMBLEMS.includes(raw.emblem) ? raw.emblem : EMBLEMS[0];
   const playerId = raw.playerId == null ? '' : String(raw.playerId);
   const serverShortId = typeof raw.shortId === 'string' ? raw.shortId.trim() : '';

@@ -1,5 +1,5 @@
 export const ONLINE_SCREENS = Object.freeze([
-  'connecting', 'lobby', 'room', 'pick', 'battle', 'result', 'closed',
+  'connecting', 'auth', 'lobby', 'room', 'pick', 'battle', 'result', 'closed',
 ]);
 
 export function resolveWebSocketUrl({

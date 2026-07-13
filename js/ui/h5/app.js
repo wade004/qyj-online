@@ -1,13 +1,18 @@
 import { HEROES, getHero } from '../../game/heroes.js';
-import { shuffle } from '../../game/deck.js';
-import { createLocalBattleSession } from '../../session/local-battle-session.js';
 import { createOnlineSession } from '../../session/online-session.js';
 import { loadPlayerProfile, validateNickname, PLAYER_EMBLEMS } from '../../services/player-profile.js';
 import { h5HeroPortrait } from '../../services/asset-variants.js';
 import { button, clear, element, trapEscape } from '../shared/dom.js';
+import { createHandHistoryPanel } from '../shared/hand-history.js';
+import { createH5AuthView } from './auth-view.js';
 import { mountH5Battle } from './battle-view.js';
 
 const PHASE_LABELS = Object.freeze({ lobby: '待命', picking: '选将中', game: '对局中', battle: '对局中' });
+
+function onlineTableSize(value) {
+  const size = Number(value?.tableSize || value?.totalPlayers || value?.maxMembers);
+  return size === 9 ? 9 : 6;
+}
 
 const POKER_CORE_STATS = Object.freeze([
   { key: 'vpip', label: 'VPIP', name: '主动入池率', description: '翻牌前主动投入筹码进入牌局的比例。', percent: true },
@@ -169,17 +174,28 @@ function header({
   ]);
 }
 
-function dialog({ title, message, confirmText = '确认', danger = false, onConfirm, onClose }) {
+function dialog({
+  title,
+  message,
+  confirmText = '确认',
+  confirmTestId = 'h5-dialog-confirm',
+  danger = false,
+  showCancel = true,
+  onConfirm,
+  onClose,
+}) {
   let releaseEscape;
   const close = () => {
     releaseEscape?.();
     layer.remove();
     onClose?.();
   };
-  const cancel = button('取消', { className: 'h5-secondary-button', on: { click: close } });
+  const cancel = showCancel
+    ? button('取消', { className: 'h5-secondary-button', on: { click: close } })
+    : null;
   const confirm = button(confirmText, {
     className: danger ? 'h5-danger-button' : 'h5-primary-button',
-    attrs: { 'data-testid': 'h5-dialog-confirm' },
+    attrs: { 'data-testid': confirmTestId },
     on: {
       click: async () => {
         confirm.disabled = true;
@@ -244,15 +260,15 @@ export function classifyH5GameOutcome(ranking = [], myIdx = 1) {
 }
 
 export function mountH5App({ root }) {
-  let current = 'mode';
+  let current = 'boot';
   let currentView = null;
-  let localSession = null;
   let onlineSession = null;
   let onlineUnsubscribe = null;
   let onlineState = null;
   let lastOnlineData = null;
   let lastOnlineScreen = '';
   let lastOnlineBattle = null;
+  let lastOnlineRevision = -1;
   let lastNoticeId = 0;
   let selectedHeroId = HEROES[0].id;
   let profile = loadPlayerProfile();
@@ -303,12 +319,6 @@ export function mountH5App({ root }) {
     currentView = null;
   }
 
-  function stopLocal() {
-    destroyView();
-    localSession?.destroy?.();
-    localSession = null;
-  }
-
   function stopOnline() {
     destroyView();
     onlineUnsubscribe?.();
@@ -319,6 +329,7 @@ export function mountH5App({ root }) {
     lastOnlineData = null;
     lastOnlineScreen = '';
     lastOnlineBattle = null;
+    lastOnlineRevision = -1;
     lastNoticeId = 0;
   }
 
@@ -342,45 +353,6 @@ export function mountH5App({ root }) {
         on: { click: () => onlineSession?.reconnect() },
       }),
     ])));
-  }
-
-  function showMode() {
-    stopLocal();
-    stopOnline();
-    current = 'mode';
-    const single = button('', {
-      className: 'h5-mode-card',
-      attrs: { 'data-testid': 'h5-mode-single', 'aria-label': '单机人机对战' },
-      on: { click: showSinglePick },
-    }, [
-      element('span', { className: 'h5-mode-card__mark', text: '单' }),
-      element('span', { className: 'h5-mode-card__copy' }, [
-        element('strong', { text: '单机 · 人机对战' }),
-        element('small', { text: '选择英雄，与五名 AI 完成 12 回合对局' }),
-      ]),
-      element('span', { className: 'h5-mode-card__arrow', text: '›' }),
-    ]);
-    const online = button('', {
-      className: 'h5-mode-card is-online',
-      attrs: { 'data-testid': 'h5-mode-online', 'aria-label': '联机组队对战' },
-      on: { click: startOnline },
-    }, [
-      element('span', { className: 'h5-mode-card__mark', text: '联' }),
-      element('span', { className: 'h5-mode-card__copy' }, [
-        element('strong', { text: '联机 · 组队对战' }),
-        element('small', { text: '1–3 名真人，AI 补足至 6 人' }),
-      ]),
-      element('span', { className: 'h5-mode-card__arrow', text: '›' }),
-    ]);
-    clear(root, element('div', { className: 'h5-screen h5-home', attrs: { 'data-testid': 'h5-home' } }, [
-      element('section', { className: 'h5-home__brand' }, [
-        element('p', { className: 'h5-eyebrow', text: 'HEROES SHOWDOWN' }),
-        element('h1', { text: '群 英 决' }),
-        element('p', { text: '英雄对决 · 天机博弈 · 气血为注 · 杀招定生死' }),
-        element('span', { className: 'h5-home__version', text: 'H5 横屏版 · v1.0' }),
-      ]),
-      element('section', { className: 'h5-home__modes' }, [single, online]),
-    ]));
   }
 
   function heroCards({ picks = null, onSelect }) {
@@ -429,44 +401,9 @@ export function mountH5App({ root }) {
     ]);
   }
 
-  function showSinglePick() {
-    stopLocal();
-    stopOnline();
-    current = 'single-pick';
-    const render = () => {
-      const selected = getHero(selectedHeroId) || HEROES[0];
-      const grid = element('div', { className: 'h5-hero-grid', attrs: { role: 'list', 'data-testid': 'h5-hero-grid' } }, heroCards({ onSelect: render }));
-      clear(root, element('div', { className: 'h5-screen h5-pick', attrs: { 'data-testid': 'h5-single-pick' } }, [
-        header({ title: '选择英雄', subtitle: '单机 · 点击查看，确认后开战', onBack: showMode }),
-        element('div', { className: 'h5-pick__body' }, [
-          element('section', { className: 'h5-pick__grid-wrap' }, grid),
-          heroDetail({ hero: selected, primaryText: '选择该英雄并开战', onPrimary: () => startLocalBattle(selected.id) }),
-        ]),
-      ]));
-    };
-    render();
-  }
-
-  function startLocalBattle(heroId) {
-    stopLocal();
-    current = 'single-battle';
-    const rest = shuffle(HEROES.filter((hero) => hero.id !== heroId).map((hero) => hero.id));
-    localSession = createLocalBattleSession({
-      heroIds: [heroId, ...rest.slice(0, 5)],
-      rules: { endWhenHumanEliminated: true },
-    });
-    currentView = mountH5Battle({
-      root,
-      battle: localSession,
-      myIdx: 1,
-      onGameOver: (ranking) => showResult(ranking, 1, false),
-    });
-    localSession.start();
-  }
-
-  function showResult(ranking = [], myIdx = 1, isOnline = false) {
+  function showResult(ranking = [], myIdx = 1) {
     destroyView();
-    current = isOnline ? 'online-result' : 'single-result';
+    current = 'online-result';
     const resultRows = Array.isArray(ranking) ? ranking : [];
     const {
       myRank,
@@ -497,7 +434,7 @@ export function mountH5App({ root }) {
       ]);
     });
     clear(root, element('div', { className: 'h5-screen h5-result', attrs: { 'data-testid': 'h5-result' } }, [
-      header({ title: '本局结算', subtitle: isOnline ? '联机对局' : '单机对局' }),
+      header({ title: '本局结算', subtitle: '联网对局' }),
       element('main', { className: 'h5-result__body' }, [
         element('section', {
           className: `h5-result__summary is-${outcome}`,
@@ -532,10 +469,10 @@ export function mountH5App({ root }) {
             className: 'h5-result__survival',
             text: myPlayer.alive ? `终局气血 ${myPlayer.hp}` : `第 ${myPlayer.deathRound || '?'} 回合阵亡`,
           }),
-          button(isOnline ? '返回队伍' : '重新选将', {
+          button('返回队伍', {
             className: 'h5-primary-button',
-            attrs: { 'data-testid': isOnline ? 'h5-back-to-room' : 'h5-again' },
-            on: { click: () => isOnline ? onlineSession?.backToRoom() : showSinglePick() },
+            attrs: { 'data-testid': 'h5-back-to-room' },
+            on: { click: () => onlineSession?.backToRoom() },
           }),
         ]),
         element('section', { className: 'h5-result__ranking' }, [
@@ -550,7 +487,6 @@ export function mountH5App({ root }) {
   }
 
   function startOnline() {
-    stopLocal();
     stopOnline();
     current = 'online';
     onlineSession = createOnlineSession();
@@ -562,11 +498,15 @@ export function mountH5App({ root }) {
         lastNoticeId = Number(state.notice.id);
         noticeToShow = state.notice;
       }
-      const changed = state.screen !== lastOnlineScreen || state.data !== lastOnlineData || state.battle !== lastOnlineBattle;
+      const changed = state.screen !== lastOnlineScreen
+        || state.data !== lastOnlineData
+        || state.battle !== lastOnlineBattle
+        || (state.screen === 'auth' && Number(state.revision) !== lastOnlineRevision);
       if (changed) {
         lastOnlineScreen = state.screen;
         lastOnlineData = state.data;
         lastOnlineBattle = state.battle;
+        lastOnlineRevision = Number(state.revision);
         renderOnlineState();
       }
       renderReconnectOverlay();
@@ -583,15 +523,20 @@ export function mountH5App({ root }) {
         danger: true,
         onConfirm: () => onlineSession.leaveTeam(),
       }));
-    } else {
-      showMode();
     }
+  }
+
+  function renderOnlineAuth() {
+    clear(root, createH5AuthView({
+      state: onlineState,
+      session: onlineSession,
+    }));
   }
 
   function renderOnlineConnecting() {
     const failed = onlineState.connection === 'error' || onlineState.connection === 'closed' || onlineState.error;
     clear(root, element('div', { className: 'h5-screen h5-connection', attrs: { 'data-testid': 'h5-online-connecting' } }, [
-      header({ title: '联机模式', onBack: showMode, status: failed ? '离线' : '连接中' }),
+      header({ title: '群英决 · 联网版', status: failed ? '离线' : '连接中' }),
       element('main', { className: 'h5-state' }, [
         element('span', { className: 'h5-state__mark', text: failed ? '!' : '◎' }),
         element('h1', { text: failed ? '暂时无法连接' : '正在进入联机大厅' }),
@@ -606,6 +551,9 @@ export function mountH5App({ root }) {
   }
 
   function openH5Profile() {
+    const account = onlineState?.account || {};
+    const username = String(account.username || '—');
+    const email = String(account.email || '—');
     const nickname = element('input', {
       className: 'h5-field',
       attrs: { value: profile.nickname, maxlength: '8', 'aria-label': '玩家昵称', 'data-testid': 'h5-profile-name' },
@@ -617,8 +565,54 @@ export function mountH5App({ root }) {
       attrs: { 'aria-pressed': value === emblem ? 'true' : 'false' },
       on: { click: () => { emblem = value; options.forEach((item) => item.classList.toggle('is-selected', item.textContent === value)); } },
     }));
+    const logout = button('退出登录', {
+      className: 'h5-danger-button h5-account-panel__logout',
+      attrs: { 'data-testid': 'h5-account-logout' },
+      on: {
+        async click() {
+          if (onlineState?.authPending) return;
+          error.textContent = '';
+          logout.disabled = true;
+          logout.textContent = '退出中…';
+          nickname.disabled = true;
+          for (const option of options) option.disabled = true;
+          try {
+            const result = await onlineSession.logoutAccount();
+            if (result === false || result?.ok === false) {
+              throw new Error(result?.error?.message || result?.message || '退出登录失败，请稍后重试');
+            }
+          } catch (logoutError) {
+            error.textContent = logoutError?.message || '退出登录失败，请稍后重试';
+            logout.disabled = false;
+            logout.textContent = '重新退出';
+            nickname.disabled = false;
+            for (const option of options) option.disabled = false;
+          }
+        },
+      },
+    });
     const body = element('div', { className: 'h5-profile-form' }, [
       element('p', { text: `玩家档案 · #${profile.shortId} · 服务端同步` }),
+      element('section', {
+        className: 'h5-account-panel',
+        attrs: { 'data-testid': 'h5-account-panel', 'aria-label': '登录账号信息' },
+      }, [
+        element('div', { className: 'h5-account-panel__heading' }, [
+          element('strong', { text: '账号信息' }),
+          element('span', { text: '仅自己可见' }),
+        ]),
+        element('dl', {}, [
+          element('div', {}, [
+            element('dt', { text: '用户名' }),
+            element('dd', { text: username, attrs: { 'data-testid': 'h5-account-username', title: username } }),
+          ]),
+          element('div', {}, [
+            element('dt', { text: '邮箱' }),
+            element('dd', { text: email, attrs: { 'data-testid': 'h5-account-email', title: email } }),
+          ]),
+        ]),
+        logout,
+      ]),
       element('label', { text: '纹章' }), element('div', { className: 'h5-emblem-options' }, options),
       element('label', { text: '昵称' }), nickname, error,
     ]);
@@ -626,6 +620,7 @@ export function mountH5App({ root }) {
       title: '编辑玩家档案',
       message: body,
       confirmText: '保存',
+      confirmTestId: 'h5-profile-save',
       onConfirm: async () => {
         const checked = validateNickname(nickname.value);
         if (!checked.ok) { error.textContent = checked.reason; return false; }
@@ -639,15 +634,35 @@ export function mountH5App({ root }) {
     }));
   }
 
+  function openH5HandHistory() {
+    const history = createHandHistoryPanel({
+      prefix: 'h5-hand-history',
+      loadPage: (options) => onlineSession.getHandHistory(options),
+    });
+    root.appendChild(dialog({
+      title: '我的牌局记录',
+      message: history.root,
+      confirmText: '关闭',
+      confirmTestId: 'h5-hand-history-close',
+      showCancel: false,
+    }));
+    history.load();
+  }
+
   function renderOnlineLobby() {
     const teams = onlineState.data?.teams || [];
     const list = element('div', { className: 'h5-team-list', attrs: { 'data-testid': 'h5-team-list' } });
     if (!teams.length) list.appendChild(element('div', { className: 'h5-empty', text: '暂无公开队伍，创建第一支队伍吧。' }));
     for (const team of teams) {
-      const joinable = team.phase === 'lobby' && team.count < 3;
+      const tableSize = onlineTableSize(team);
+      const maxMembers = Number(team.maxMembers) || tableSize;
+      const joinable = team.phase === 'lobby' && Number(team.count) < maxMembers;
       list.appendChild(element('article', { className: 'h5-team-row' }, [
-        element('div', {}, [element('strong', { text: team.name || `队伍 ${team.id}` }), element('small', { text: `#${team.id}` })]),
-        element('span', { text: `${team.count}/3` }),
+        element('div', {}, [
+          element('strong', { text: team.name || `队伍 ${team.id}` }),
+          element('small', { text: `#${team.id} · ${tableSize} 人桌` }),
+        ]),
+        element('span', { text: `${team.count}/${maxMembers}` }),
         element('span', { className: `is-${team.phase}`, text: PHASE_LABELS[team.phase] || team.phase }),
         button(joinable ? '加入' : PHASE_LABELS[team.phase] || '不可加入', {
           className: joinable ? 'h5-small-button' : 'h5-small-button is-disabled',
@@ -661,14 +676,18 @@ export function mountH5App({ root }) {
         title: '联机大厅',
         subtitle: `${profile.emblem} ${profile.nickname} · #${profile.shortId}`,
         subtitleTestId: 'h5-player-id',
-        onBack: showMode,
         status: onlineState.profileSync === 'synced' ? '● 在线 · 档案已同步' : '● 在线 · 同步中',
         statusTestId: 'h5-player-sync',
       }),
       element('main', { className: 'h5-lobby__body' }, [
         element('div', { className: 'h5-lobby__head' }, [
-          element('div', {}, [element('h1', { text: '公开队伍' }), element('p', { text: '最多 3 名真人，AI 补足至 6 人' })]),
+          element('div', {}, [element('h1', { text: '公开队伍' }), element('p', { text: '6 / 9 人桌 · 1 人即可开局 · AI 自动补位' })]),
           element('div', {}, [
+            button('牌谱', {
+              className: 'h5-secondary-button',
+              attrs: { 'data-testid': 'h5-hand-history-open' },
+              on: { click: openH5HandHistory },
+            }),
             button('统计', {
               className: 'h5-secondary-button',
               attrs: { 'data-testid': 'h5-player-stats-open' },
@@ -684,12 +703,39 @@ export function mountH5App({ root }) {
         className: 'h5-primary-button',
         attrs: { 'data-testid': 'h5-create-team' },
         on: {
-          click: () => root.appendChild(dialog({
-            title: '创建队伍',
-            message: '系统将生成公开队伍：3 名真人上限，AI 补足 6 人，固定 12 回合。',
-            confirmText: '确认创建',
-            onConfirm: () => onlineSession.createTeam(),
-          })),
+          click: () => {
+            let tableSize = 6;
+            const summary = element('p', { className: 'h5-table-size-picker__summary', text: '6 名真人上限，AI 补足至 6 人。' });
+            const options = [6, 9].map((size) => button(`${size} 人桌`, {
+              className: `h5-table-size-option${size === tableSize ? ' is-active' : ''}`,
+              attrs: {
+                'data-testid': `h5-table-size-${size}`,
+                'aria-pressed': size === tableSize ? 'true' : 'false',
+              },
+              on: {
+                click: (event) => {
+                  tableSize = size;
+                  for (const option of event.currentTarget.parentElement.children) {
+                    const active = option === event.currentTarget;
+                    option.classList.toggle('is-active', active);
+                    option.setAttribute('aria-pressed', active ? 'true' : 'false');
+                  }
+                  summary.textContent = `${size} 名真人上限，AI 补足至 ${size} 人。`;
+                },
+              },
+            }));
+            root.appendChild(dialog({
+              title: '创建队伍',
+              message: element('div', { className: 'h5-table-size-picker' }, [
+                element('p', { text: '选择本局桌型。房主 1 人即可开局，空位由 AI 补齐。' }),
+                element('div', { className: 'h5-table-size-picker__options' }, options),
+                summary,
+                element('small', { text: '同一桌台内每位真人与 AI 都使用不同英雄。' }),
+              ]),
+              confirmText: '确认创建',
+              onConfirm: () => onlineSession.createTeam(tableSize),
+            }));
+          },
         },
       })),
     ]));
@@ -698,10 +744,12 @@ export function mountH5App({ root }) {
   function renderOnlineRoom() {
     const data = onlineState.data || {};
     const members = data.members || [];
+    const totalPlayers = onlineTableSize(data);
+    const maxMembers = Number(data.maxMembers) || totalPlayers;
     const me = members.find((member) => member.isYou);
     const unavailableMembers = members.filter((member) => memberConnection(member) !== 'online');
     const seats = [];
-    for (let index = 0; index < (data.maxMembers || 3); index++) {
+    for (let index = 0; index < maxMembers; index++) {
       const member = members[index];
       seats.push(member
         ? button('', {
@@ -733,25 +781,36 @@ export function mountH5App({ root }) {
         ])
         : element('article', { className: 'h5-room-seat is-empty' }, [element('span', { text: '+' }), element('strong', { text: '等待玩家' }), element('small', { text: '开局后 AI 补位' })]));
     }
-    const aiCount = 6 - members.length;
+    const aiCount = Math.max(0, totalPlayers - members.length);
     const isOwner = Boolean(data.isOwner || me?.isOwner);
     const startBlocked = unavailableMembers.length > 0;
     clear(root, element('div', { className: 'h5-screen h5-room', attrs: { 'data-testid': 'h5-online-room' } }, [
-      header({ title: data.name || '队伍房间', subtitle: `房间 #${data.id || ''} · ${members.length}/3 真人`, onBack: onlineBack, status: '● 在线' }),
+      header({ title: data.name || '队伍房间', subtitle: `房间 #${data.id || ''} · ${totalPlayers} 人桌 · ${members.length}/${maxMembers} 真人`, onBack: onlineBack, status: '● 在线' }),
       element('main', { className: 'h5-room__body' }, [
         element('section', { className: 'h5-room__seats' }, [
           element('div', { className: 'h5-room__section-head' }, [element('h1', { text: '真人席位' }), element('span', { text: '无准备环节' })]),
-          element('div', { className: 'h5-room-seat-grid', attrs: { 'data-testid': 'h5-room-members' } }, seats),
+          element('div', {
+            className: 'h5-room-seat-grid',
+            attrs: { 'data-testid': 'h5-room-members', 'data-table-size': String(totalPlayers) },
+          }, seats),
         ]),
         element('aside', { className: 'h5-room__summary' }, [
           element('h2', { text: '本局信息' }),
           element('dl', {}, [
-            element('div', {}, [element('dt', { text: '真人' }), element('dd', { text: `${members.length}/3` })]),
+            element('div', {}, [element('dt', { text: '桌型' }), element('dd', { text: `${totalPlayers} 人桌` })]),
+            element('div', {}, [element('dt', { text: '真人' }), element('dd', { text: `${members.length}/${maxMembers}` })]),
             element('div', {}, [element('dt', { text: 'AI 补位' }), element('dd', { text: `${aiCount} 名` })]),
-            element('div', {}, [element('dt', { text: '总人数' }), element('dd', { text: '6 人' })]),
+            element('div', {}, [element('dt', { text: '总人数' }), element('dd', { text: `${totalPlayers} 人` })]),
             element('div', {}, [element('dt', { text: '赛制' }), element('dd', { text: '12 回合' })]),
           ]),
-          button('编辑档案', { className: 'h5-secondary-button', on: { click: openH5Profile } }),
+          element('div', { className: 'h5-room__profile-actions' }, [
+            button('牌局记录', {
+              className: 'h5-secondary-button',
+              attrs: { 'data-testid': 'h5-hand-history-open' },
+              on: { click: openH5HandHistory },
+            }),
+            button('编辑档案', { className: 'h5-secondary-button', on: { click: openH5Profile } }),
+          ]),
         ]),
       ]),
       element('footer', { className: 'h5-sticky-footer h5-room__actions' }, [
@@ -829,8 +888,7 @@ export function mountH5App({ root }) {
       root,
       battle: onlineState.battle,
       myIdx: onlineState.data?.mySeat || 1,
-      online: true,
-      onGameOver: (ranking) => showResult(ranking, onlineState.data?.mySeat || 1, true),
+      onGameOver: (ranking) => showResult(ranking, onlineState.data?.mySeat || 1),
     });
   }
 
@@ -838,33 +896,32 @@ export function mountH5App({ root }) {
     if (!onlineState || !onlineSession) return;
     current = `online-${onlineState.screen}`;
     if (onlineState.screen !== 'battle') destroyView();
-    if (onlineState.screen === 'lobby') renderOnlineLobby();
+    if (onlineState.screen === 'auth') renderOnlineAuth();
+    else if (onlineState.screen === 'lobby') renderOnlineLobby();
     else if (onlineState.screen === 'room') renderOnlineRoom();
     else if (onlineState.screen === 'pick') renderOnlinePick();
     else if (onlineState.screen === 'battle') renderOnlineBattle();
-    else if (onlineState.screen === 'result') showResult(onlineState.data?.ranking || [], onlineState.data?.mySeat || 1, true);
+    else if (onlineState.screen === 'result') showResult(onlineState.data?.ranking || [], onlineState.data?.mySeat || 1);
     else renderOnlineConnecting();
   }
 
   function tick(dt, interactionAllowed = true) {
     if (!started) return;
-    if (onlineSession) {
-      onlineSession.tick(dt);
-      currentView?.tick?.(dt);
-    } else if (localSession && interactionAllowed) {
-      localSession.update(dt);
-      currentView?.tick?.(dt);
-    }
+    if (!interactionAllowed || !onlineSession) return;
+    onlineSession.tick(dt);
+    currentView?.tick?.(dt);
   }
 
-  showMode();
   return {
-    start() { started = true; },
+    start() {
+      if (started) return;
+      started = true;
+      startOnline();
+    },
     tick,
     get screen() { return current; },
     get isOnlineBattle() { return current === 'online-battle'; },
     destroy() {
-      stopLocal();
       stopOnline();
       clear(root);
     },

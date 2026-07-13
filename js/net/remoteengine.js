@@ -36,7 +36,24 @@ export class RemoteEngine {
   constructor(startData, listeners, sendFn) {
     this.listeners = listeners;
     this.send = sendFn;
-    this.myIdx = startData.mySeat;
+    const inferredSize = Array.isArray(startData?.players) ? startData.players.length : 0;
+    const requestedTableSize = Number(startData?.tableSize ?? inferredSize ?? Config.DEFAULT_TABLE_SIZE);
+    if (!Config.SUPPORTED_TABLE_SIZES.includes(requestedTableSize)) {
+      throw new RangeError(`Unsupported remote table size: ${requestedTableSize}`);
+    }
+    if (!Array.isArray(startData.players) || startData.players.length !== requestedTableSize) {
+      throw new RangeError(`Remote gameStart must contain ${requestedTableSize} players`);
+    }
+    const seats = new Set(startData.players.map((player) => Number(player.seat)));
+    if (seats.size !== requestedTableSize
+      || [...seats].some((seat) => !Number.isInteger(seat) || seat < 1 || seat > requestedTableSize)) {
+      throw new RangeError('Remote gameStart seats must uniquely cover the selected table');
+    }
+    this.tableSize = requestedTableSize;
+    this.myIdx = Number(startData.mySeat);
+    if (!Number.isInteger(this.myIdx) || this.myIdx < 1 || this.myIdx > this.tableSize) {
+      throw new RangeError('Remote gameStart mySeat is outside the selected table');
+    }
     this.players = [null];
     for (const p of startData.players) {
       this.players[p.seat] = {
@@ -87,6 +104,31 @@ export class RemoteEngine {
     this.queue = [];
   }
 
+  applyRoster(roster = []) {
+    if (!Array.isArray(roster)) return false;
+    let applied = false;
+    for (const raw of roster) {
+      const seat = Number(raw?.seat);
+      const player = this.players[seat];
+      if (!player) continue;
+      if (raw.heroId) player.hero = getHero(raw.heroId) || player.hero;
+      if (typeof raw.name === 'string' && raw.name.trim()) {
+        player.playerName = raw.name.trim();
+      }
+      if (Object.hasOwn(raw, 'isHuman')) player.isHuman = Boolean(raw.isHuman);
+      if (Object.hasOwn(raw, 'playerId')) player.playerId = raw.playerId || null;
+      if (Object.hasOwn(raw, 'shortId')) player.shortId = raw.shortId || null;
+      if (Object.hasOwn(raw, 'emblem')) player.emblem = raw.emblem || '侠';
+      if (Object.hasOwn(raw, 'pokerStats')) {
+        player.pokerStats = raw.pokerStats && typeof raw.pokerStats === 'object'
+          ? { ...raw.pokerStats }
+          : null;
+      }
+      applied = true;
+    }
+    return applied;
+  }
+
   // ---- 与本地 Engine 对齐的查询接口 ----
 
   totalPot() { return this.pot; }
@@ -129,6 +171,12 @@ export class RemoteEngine {
     return false; // 剩余时间由服务器重播 await 刷新
   }
 
+  sendChat(text) {
+    const value = String(text || '').trim();
+    if (!value || [...value].length > 80) return false;
+    return this.send({ cmd: 'chat', text: value }) !== false;
+  }
+
   // ---- 延时队列（演出用） ----
 
   delay(sec, fn) { this.queue.push({ due: this.time + sec, fn }); }
@@ -144,6 +192,9 @@ export class RemoteEngine {
 
   applySnapshot(s) {
     if (!s) return;
+    if (s.tableSize != null && Number(s.tableSize) !== this.tableSize) {
+      throw new RangeError('Remote snapshot tableSize does not match gameStart');
+    }
     const previousStreet = this.street;
     this.round = s.round ?? this.round;
     this.street = s.street ?? this.street;
@@ -174,7 +225,7 @@ export class RemoteEngine {
     if (s.players) {
       for (const sp of s.players) {
         const p = this.players[sp.seat];
-        if (!p) continue;
+        if (!p) throw new RangeError(`Remote snapshot contains unknown seat ${sp.seat}`);
         p.hp = sp.hp; p.energy = sp.energy; p.alive = sp.alive;
         p.folded = sp.folded; p.allIn = sp.allIn;
         p.betStreet = sp.betStreet; p.betRound = sp.betRound;
@@ -221,6 +272,10 @@ export class RemoteEngine {
     if (ev === 'onRoundStart') {
       this.actingIdx = 0;
       this.actionClock = null;
+      for (const player of this.players.slice(1)) {
+        player.hole = [];
+        player.showdownInfo = null;
+      }
       if (!snapshotHasPlayerActions) {
         for (const player of this.players.slice(1)) {
           player.acted = false;
@@ -344,6 +399,7 @@ export class RemoteEngine {
     if (handler) {
       switch (ev) {
         case 'onLog': handler(a.text, a.kind); break;
+        case 'chat': handler(a); break;
         case 'onRoundStart': handler(a.round, a.blinds, a.dealerIdx); break;
         case 'onBlindsPosted': handler(a.sbIdx, a.sbAmt, a.bbIdx, a.bbAmt); break;
         case 'onTurnStart': handler(a.idx, a.clock || this.actionClock); break;

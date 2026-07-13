@@ -13,8 +13,10 @@ const server = startServer(0, {
 await server.ready;
 const PORT = server.wss.address().port;
 
-function makeClient(tag) {
-  const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
+function makeClient(tag, cookie) {
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, {
+    headers: { cookie },
+  });
   const inbox = [];
   const waiters = [];
   ws.addEventListener('message', (e) => {
@@ -58,8 +60,25 @@ function makeClient(tag) {
 
 const assert = (cond, msg) => { if (!cond) throw new Error('断言失败: ' + msg); };
 
-const A = makeClient('A');
-const B = makeClient('B');
+async function createAuthenticatedCookie(tag) {
+  const registered = await server.playerStore.registerAccount({
+    username: `smoke_${tag.toLowerCase()}`,
+    email: `smoke.${tag.toLowerCase()}@example.com`,
+    password: 'smoke-password-2026',
+    guestId: `guest-mp-smoke-${tag.toLowerCase()}-000001`,
+    nickname: `联机玩家${tag}`,
+    emblem: '侠',
+  });
+  const issued = server.playerStore.issueAuthSession(registered.profile.playerId);
+  return `qyj_session=${issued.token}`;
+}
+
+const [cookieA, cookieB] = await Promise.all([
+  createAuthenticatedCookie('A'),
+  createAuthenticatedCookie('B'),
+]);
+const A = makeClient('A', cookieA);
+const B = makeClient('B', cookieB);
 await Promise.all([A.open(), B.open()]);
 
 // 1. 大厅与赐名

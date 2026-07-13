@@ -8,7 +8,6 @@ const MUTE_STORAGE_KEY = 'qyj.masterMuted';
 // BGM 音轨池
 export const BGM_TRACKS = Object.freeze([
   `${AUDIO_BASE}/bgm/music_default.mp3`,
-  `${AUDIO_BASE}/bgm/music_danji.mp3`,
   `${AUDIO_BASE}/bgm/music_jifeng.mp3`,
   `${AUDIO_BASE}/bgm/aozhan_online.mp3`,
 ]);

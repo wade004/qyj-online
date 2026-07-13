@@ -1,7 +1,18 @@
 // WebSocket wire protocol validation shared by the server transport and tests.
 // Existing command/event envelopes stay unchanged: { cmd, ... } and { ev, a, s }.
 
+import {
+  DEFAULT_TABLE_SIZE as GAME_DEFAULT_TABLE_SIZE,
+  SUPPORTED_TABLE_SIZES as GAME_SUPPORTED_TABLE_SIZES,
+} from '../js/game/config.js';
+
 export const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024;
+export const PROTOCOL_VERSION = 3;
+export const DEFAULT_TABLE_SIZE = GAME_DEFAULT_TABLE_SIZE;
+export const SUPPORTED_TABLE_SIZES = GAME_SUPPORTED_TABLE_SIZES;
+export const TABLE_SIZE_9_CAPABILITY = 'table-size-9';
+
+const TABLE_SIZE_SET = new Set(SUPPORTED_TABLE_SIZES);
 
 export const ERROR_CODES = Object.freeze({
   INVALID_JSON: 'INVALID_JSON',
@@ -38,12 +49,17 @@ export const ERROR_CODES = Object.freeze({
   INVALID_PROFILE: 'INVALID_PROFILE',
   PLAYER_NOT_IDENTIFIED: 'PLAYER_NOT_IDENTIFIED',
   PLAYER_ALREADY_IDENTIFIED: 'PLAYER_ALREADY_IDENTIFIED',
+  UNSUPPORTED_TABLE_SIZE: 'UNSUPPORTED_TABLE_SIZE',
+  CLIENT_UPGRADE_REQUIRED: 'CLIENT_UPGRADE_REQUIRED',
+  AUTH_REQUIRED: 'AUTH_REQUIRED',
+  AUTH_SESSION_INVALID: 'AUTH_SESSION_INVALID',
 });
 
 const KNOWN_COMMANDS = new Set([
+  'hello',
   'create', 'join', 'leave', 'rename', 'startPick', 'pick', 'startGame',
   'act', 'skill', 'extend', 'backToRoom', 'lobby', 'resume',
-  'identify', 'updateProfile',
+  'identify', 'updateProfile', 'chat',
 ]);
 
 const ACTION_TYPES = new Set(['fold', 'check', 'call', 'raise', 'allin']);
@@ -86,7 +102,28 @@ function validateEmblem(value) {
 }
 
 function validateFields(msg) {
+  if (msg.protocolVersion != null
+    && (!Number.isSafeInteger(msg.protocolVersion)
+      || msg.protocolVersion < 1 || msg.protocolVersion > 100)) {
+    return failure(ERROR_CODES.INVALID_FIELD, 'protocolVersion 格式无效');
+  }
+  if (msg.capabilities != null) {
+    if (!Array.isArray(msg.capabilities) || msg.capabilities.length > 16
+      || msg.capabilities.some((value) => typeof value !== 'string'
+        || value.length < 1 || value.length > 64)) {
+      return failure(ERROR_CODES.INVALID_FIELD, 'capabilities 格式无效');
+    }
+  }
   switch (msg.cmd) {
+    case 'create':
+      if (msg.tableSize != null
+        && (!Number.isSafeInteger(msg.tableSize) || !TABLE_SIZE_SET.has(msg.tableSize))) {
+        return failure(
+          ERROR_CODES.UNSUPPORTED_TABLE_SIZE,
+          `tableSize 仅支持 ${SUPPORTED_TABLE_SIZES.join('/')} 人桌`,
+        );
+      }
+      break;
     case 'resume':
       if (typeof msg.resumeToken !== 'string'
         || msg.resumeToken.length < 16 || msg.resumeToken.length > 256) {
@@ -145,6 +182,17 @@ function validateFields(msg) {
         return failure(ERROR_CODES.INVALID_FIELD, '加注命令必须提供 tierKey');
       }
       break;
+    case 'chat': {
+      if (typeof msg.text !== 'string') {
+        return failure(ERROR_CODES.INVALID_FIELD, '聊天内容必须是字符串');
+      }
+      const text = msg.text.trim().normalize('NFC');
+      if ([...text].length < 1 || [...text].length > 80
+        || FORBIDDEN_NICKNAME_RE.test(text)) {
+        return failure(ERROR_CODES.INVALID_FIELD, '聊天内容需为 1~80 个可用字符');
+      }
+      break;
+    }
     case 'skill': {
       if (msg.selection == null) break;
       if (!isPlainObject(msg.selection)) {

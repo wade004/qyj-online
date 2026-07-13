@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
+  PLAYER_SCHEMA_VERSION,
   PlayerValidationError,
   createPlayerStore,
   normalizeEmblem,
@@ -140,6 +142,7 @@ test('一场对局原子累计统计、生成最近战绩且 matchId 幂等', ()
     });
     assert.deepEqual(store.getProfile(a.playerId).recentMatches[0], {
       matchId: 'match_20260711_001',
+      tableSize: 6,
       placement: 1,
       heroId: 'xiangyu',
       playedAt: new Date(now).toISOString(),
@@ -177,6 +180,39 @@ test('一场对局原子累计统计、生成最近战绩且 matchId 幂等', ()
   }
 });
 
+test('9 人桌允许第 9 名并持久化桌型，旧调用仍默认 6 人桌', () => {
+  const store = createPlayerStore({ databasePath: ':memory:' });
+  try {
+    const player = store.identify({
+      guestId: 'guest-nine-seat-player-0001', nickname: '九席客', emblem: '侠',
+    }).profile;
+    const written = store.recordMatch({
+      matchId: 'match_nine_seat_001',
+      tableSize: 9,
+      results: [
+        { playerId: player.playerId, placement: 9, heroId: 'xiangyu', survived: false },
+      ],
+    });
+    assert.equal(written.inserted, 1);
+    assert.equal(store.getProfile(player.playerId).stats.bestRank, 9);
+    assert.equal(store.getProfile(player.playerId).recentMatches[0].tableSize, 9);
+    const stored = store.db.prepare(`
+      SELECT table_size, placement FROM player_match_results WHERE match_id = ?
+    `).get('match_nine_seat_001');
+    assert.equal(stored.table_size, 9);
+    assert.equal(stored.placement, 9);
+    assert.throws(() => store.recordMatch({
+      matchId: 'match_six_seat_invalid_rank',
+      results: [
+        { playerId: player.playerId, placement: 9, heroId: 'xiangyu', survived: false },
+      ],
+    }), (error) => error instanceof PlayerValidationError
+      && error.code === 'INVALID_MATCH_RESULT');
+  } finally {
+    store.close();
+  }
+});
+
 test('非法批次在事务开始前拒绝且不产生部分统计', () => {
   const store = createPlayerStore({ databasePath: ':memory:' });
   try {
@@ -206,4 +242,94 @@ test('身份、昵称与纹章验证拒绝路径/控制字符/未知纹章', () 
   assertValidation(() => normalizeNickname('甲\n乙'), 'INVALID_NAME');
   assertValidation(() => normalizeNickname('超过八个字符的玩家名称'), 'INVALID_NAME');
   assertValidation(() => normalizeEmblem('https://example.com/a.svg'), 'INVALID_EMBLEM');
+});
+
+test('schema v4 migration backfills only account profiles still using the system-default nickname', async () => {
+  await withTempDatabase(async ({ databasePath }) => {
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE players (
+        player_id TEXT PRIMARY KEY,
+        short_id TEXT NOT NULL UNIQUE,
+        guest_hash TEXT NOT NULL UNIQUE,
+        nickname TEXT NOT NULL,
+        emblem TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        matches INTEGER NOT NULL DEFAULT 0 CHECK (matches >= 0),
+        wins INTEGER NOT NULL DEFAULT 0 CHECK (wins >= 0),
+        top3 INTEGER NOT NULL DEFAULT 0 CHECK (top3 >= 0),
+        best_rank INTEGER CHECK (best_rank BETWEEN 1 AND 9 OR best_rank IS NULL)
+      );
+      CREATE TABLE player_accounts (
+        player_id TEXT PRIMARY KEY REFERENCES players(player_id) ON DELETE CASCADE,
+        username TEXT NOT NULL,
+        username_key TEXT NOT NULL UNIQUE
+          CHECK (length(username_key) BETWEEN 3 AND 20),
+        email TEXT NOT NULL,
+        email_key TEXT NOT NULL UNIQUE
+          CHECK (length(email_key) BETWEEN 3 AND 254),
+        password_hash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK (status IN ('active', 'disabled')),
+        auth_version INTEGER NOT NULL DEFAULT 1 CHECK (auth_version > 0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        password_changed_at INTEGER NOT NULL,
+        last_login_at INTEGER
+      );
+      PRAGMA user_version = 4;
+    `);
+    const createdAt = Date.UTC(2026, 6, 1);
+    const defaultPlayerId = `p_${'D'.repeat(22)}`;
+    const customPlayerId = `p_${'C'.repeat(22)}`;
+    const guestOnlyPlayerId = `p_${'G'.repeat(22)}`;
+    const insertPlayer = legacy.prepare(`
+      INSERT INTO players (
+        player_id, short_id, guest_hash, nickname, emblem, created_at, last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertPlayer.run(
+      defaultPlayerId, 'D0000001', 'legacy-default-account-hash', '无名侠客', '侠',
+      createdAt, createdAt,
+    );
+    insertPlayer.run(
+      customPlayerId, 'C0000001', 'legacy-custom-account-hash', '自定义侠客', '群',
+      createdAt, createdAt,
+    );
+    insertPlayer.run(
+      guestOnlyPlayerId, 'G0000001', 'legacy-default-guest-hash', '无名侠客', '墨',
+      createdAt, createdAt,
+    );
+    const insertAccount = legacy.prepare(`
+      INSERT INTO player_accounts (
+        player_id, username, username_key, email, email_key, password_hash,
+        created_at, updated_at, password_changed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertAccount.run(
+      defaultPlayerId, '阳顶天', '阳顶天', 'legacy.default@example.com',
+      'legacy.default@example.com', 'legacy-password-hash', createdAt, createdAt, createdAt,
+    );
+    insertAccount.run(
+      customPlayerId, '东方白', '东方白', 'legacy.custom@example.com',
+      'legacy.custom@example.com', 'legacy-password-hash', createdAt, createdAt, createdAt,
+    );
+    legacy.close();
+
+    assert.ok(PLAYER_SCHEMA_VERSION > 4, '昵称回填需要通过 v4 之后的 schema 迁移发布');
+    const store = createPlayerStore({ databasePath });
+    try {
+      assert.equal(store.getProfile(defaultPlayerId).nickname, '阳顶天');
+      assert.equal(store.getProfile(customPlayerId).nickname, '自定义侠客');
+      assert.equal(store.getProfile(guestOnlyPlayerId).nickname, '无名侠客');
+      assert.equal(
+        Number(store.db.prepare('PRAGMA user_version').get().user_version),
+        PLAYER_SCHEMA_VERSION,
+      );
+    } finally {
+      store.close();
+    }
+  });
 });

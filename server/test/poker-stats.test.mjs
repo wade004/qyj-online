@@ -209,7 +209,41 @@ test('recordGame 在同一事务写逐手与赛果并对整场重放幂等', () 
   }
 });
 
-test('schema v1 原地迁移到 v2，旧玩家与赛果保持可读', async () => {
+test('9 人桌单场可原子写入 9 份赛果与 108 条逐手统计', () => {
+  const store = createPlayerStore({ databasePath: ':memory:' });
+  try {
+    const players = Array.from({ length: 9 }, (_, index) =>
+      identity(store, `9${String(index).padStart(3, '0')}`));
+    const results = players.map((player, index) => ({
+      playerId: player.playerId,
+      placement: index + 1,
+      heroId: HEROES[index].id,
+      survived: index === 0,
+    }));
+    const hands = players.flatMap((player) =>
+      Array.from({ length: 12 }, (_, index) => blankHand(player.playerId, index + 1)));
+    const written = store.recordGame({
+      matchId: 'nine_seat_full_stats_001',
+      tableSize: 9,
+      results,
+      hands,
+    });
+    assert.equal(written.inserted, 9);
+    assert.equal(written.insertedHands, 108);
+    assert.equal(store.db.prepare(`
+      SELECT COUNT(*) AS count FROM player_poker_hands
+      WHERE match_id = ? AND table_size = 9
+    `).get('nine_seat_full_stats_001').count, 108);
+    assert.equal(store.db.prepare(`
+      SELECT COUNT(*) AS count FROM player_match_results
+      WHERE match_id = ? AND table_size = 9
+    `).get('nine_seat_full_stats_001').count, 9);
+  } finally {
+    store.close();
+  }
+});
+
+test('schema v1 原地迁移到 v3，旧玩家、赛果与默认 6 人桌保持可读', async () => {
   await withTempDatabase(async (databasePath) => {
     const legacy = new DatabaseSync(databasePath);
     legacy.exec(`
@@ -262,12 +296,115 @@ test('schema v1 原地迁移到 v2，旧玩家与赛果保持可读', async () =
       assert.equal(profile.nickname, '旧档客');
       assert.equal(profile.stats.matches, 1);
       assert.equal(profile.recentMatches[0].matchId, 'legacy_match');
+      assert.equal(profile.recentMatches[0].tableSize, 6);
       assert.equal(profile.pokerStats.hands, 0);
       store.recordHands({
         matchId: 'migrated_hand',
         hands: [blankHand(playerId, 1, { vpip: 1 })],
       });
       assert.equal(store.getProfile(playerId).pokerStats.hands, 1);
+      assert.equal(
+        store.db.prepare(`
+          SELECT table_size FROM player_poker_hands WHERE match_id = ?
+        `).get('migrated_hand').table_size,
+        6,
+      );
+      assert.equal(
+        Number(store.db.prepare('PRAGMA user_version').get().user_version),
+        PLAYER_SCHEMA_VERSION,
+      );
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test('生产 schema v2 原地迁移到 v3 后解除 6 名次约束并补齐 table_size', async () => {
+  await withTempDatabase(async (databasePath) => {
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE players (
+        player_id TEXT PRIMARY KEY,
+        short_id TEXT NOT NULL UNIQUE,
+        guest_hash TEXT NOT NULL UNIQUE,
+        nickname TEXT NOT NULL,
+        emblem TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        matches INTEGER NOT NULL DEFAULT 0 CHECK (matches >= 0),
+        wins INTEGER NOT NULL DEFAULT 0 CHECK (wins >= 0),
+        top3 INTEGER NOT NULL DEFAULT 0 CHECK (top3 >= 0),
+        best_rank INTEGER CHECK (best_rank BETWEEN 1 AND 6 OR best_rank IS NULL)
+      );
+      CREATE TABLE player_match_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id TEXT NOT NULL,
+        player_id TEXT NOT NULL REFERENCES players(player_id) ON DELETE CASCADE,
+        placement INTEGER NOT NULL CHECK (placement BETWEEN 1 AND 6),
+        hero_id TEXT NOT NULL,
+        survived INTEGER NOT NULL CHECK (survived IN (0, 1)),
+        played_at INTEGER NOT NULL,
+        UNIQUE (match_id, player_id)
+      );
+      CREATE TABLE player_poker_hands (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id TEXT NOT NULL,
+        round INTEGER NOT NULL CHECK (round BETWEEN 1 AND 12),
+        player_id TEXT NOT NULL REFERENCES players(player_id) ON DELETE CASCADE,
+        played_at INTEGER NOT NULL,
+        vpip INTEGER NOT NULL DEFAULT 0 CHECK (vpip IN (0, 1)),
+        pfr INTEGER NOT NULL DEFAULT 0 CHECK (pfr IN (0, 1)),
+        three_bet INTEGER NOT NULL DEFAULT 0 CHECK (three_bet IN (0, 1)),
+        three_bet_opportunity INTEGER NOT NULL DEFAULT 0 CHECK (three_bet_opportunity IN (0, 1)),
+        postflop_aggressive_actions INTEGER NOT NULL DEFAULT 0 CHECK (postflop_aggressive_actions >= 0),
+        postflop_call_actions INTEGER NOT NULL DEFAULT 0 CHECK (postflop_call_actions >= 0),
+        postflop_fold_actions INTEGER NOT NULL DEFAULT 0 CHECK (postflop_fold_actions >= 0),
+        saw_flop INTEGER NOT NULL DEFAULT 0 CHECK (saw_flop IN (0, 1)),
+        showdown INTEGER NOT NULL DEFAULT 0 CHECK (showdown IN (0, 1)),
+        showdown_win INTEGER NOT NULL DEFAULT 0 CHECK (showdown_win IN (0, 1)),
+        cbet INTEGER NOT NULL DEFAULT 0 CHECK (cbet IN (0, 1)),
+        cbet_opportunity INTEGER NOT NULL DEFAULT 0 CHECK (cbet_opportunity IN (0, 1)),
+        fold_to_cbet INTEGER NOT NULL DEFAULT 0 CHECK (fold_to_cbet IN (0, 1)),
+        fold_to_cbet_opportunity INTEGER NOT NULL DEFAULT 0 CHECK (fold_to_cbet_opportunity IN (0, 1)),
+        UNIQUE (match_id, round, player_id)
+      );
+      PRAGMA user_version = 2;
+    `);
+    const playerId = `p_${'B'.repeat(22)}`;
+    const playedAt = Date.UTC(2026, 0, 2);
+    legacy.prepare(`
+      INSERT INTO players VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(playerId, 'B1C2D3E4', 'legacy-v2-hash', '旧二档', '侠',
+      playedAt, playedAt, 1, 0, 0, 6);
+    legacy.prepare(`
+      INSERT INTO player_match_results
+        (match_id, player_id, placement, hero_id, survived, played_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run('legacy_v2_match', playerId, 6, 'xiangyu', 0, playedAt);
+    legacy.prepare(`
+      INSERT INTO player_poker_hands (match_id, round, player_id, played_at)
+      VALUES (?, ?, ?, ?)
+    `).run('legacy_v2_match', 1, playerId, playedAt);
+    legacy.close();
+
+    const store = createPlayerStore({ databasePath, now: () => playedAt + DAY_MS });
+    try {
+      const profile = store.getProfile(playerId);
+      assert.equal(profile.recentMatches[0].tableSize, 6);
+      assert.equal(profile.pokerStats.hands, 1);
+      store.recordMatch({
+        matchId: 'migrated_v2_nine_seat',
+        tableSize: 9,
+        results: [{
+          playerId, placement: 9, heroId: 'xiangyu', survived: false,
+        }],
+      });
+      const migrated = store.db.prepare(`
+        SELECT table_size, placement FROM player_match_results WHERE match_id = ?
+      `).get('migrated_v2_nine_seat');
+      assert.equal(migrated.table_size, 9);
+      assert.equal(migrated.placement, 9);
       assert.equal(
         Number(store.db.prepare('PRAGMA user_version').get().user_version),
         PLAYER_SCHEMA_VERSION,

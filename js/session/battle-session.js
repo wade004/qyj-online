@@ -1,5 +1,4 @@
-// Shared facade used by PC/H5 battle renderers. It keeps the UI contract
-// identical for the authoritative local Engine and the mirrored RemoteEngine.
+// H5 battle facade over the server-authoritative RemoteEngine mirror.
 
 export const BATTLE_ENGINE_METHODS = Object.freeze([
   'update',
@@ -37,7 +36,7 @@ export function assertBattleEngineContract(engine, label = 'BattleEngine') {
 }
 
 export class BattleSession {
-  constructor(engine, listeners, { kind = 'local' } = {}) {
+  constructor(engine, listeners, { kind = 'remote' } = {}) {
     assertBattleEngineContract(engine, `${kind} battle engine`);
     this.rawEngine = engine;
     this.listeners = listeners || engine.listeners || {};
@@ -46,6 +45,7 @@ export class BattleSession {
   }
 
   get players() { return this.rawEngine.players; }
+  get tableSize() { return this.rawEngine.tableSize ?? this.rawEngine.players.length - 1; }
   get board() { return this.rawEngine.board; }
   get waitingIdx() { return this.rawEngine.waitingIdx ?? null; }
   get actingIdx() { return this.rawEngine.actingIdx ?? 0; }
@@ -63,6 +63,7 @@ export class BattleSession {
   getState() {
     return {
       kind: this.kind,
+      tableSize: this.tableSize,
       players: this.players,
       board: this.board,
       waitingIdx: this.waitingIdx,
@@ -107,6 +108,7 @@ export class BattleSession {
   skillAvailability(idx) { return this.rawEngine.skillAvailability(idx); }
   getSkillPrompt(idx) { return this.rawEngine.getSkillPrompt(idx); }
   useSkill(idx, selection = null) { return this.rawEngine.useSkill(idx, selection); }
+  sendChat(text) { return this.rawEngine.sendChat?.(text) ?? false; }
 
   onMessage(message) {
     if (typeof this.rawEngine.onMessage === 'function') {

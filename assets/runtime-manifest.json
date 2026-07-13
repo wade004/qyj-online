@@ -2,33 +2,10 @@
   "schemaVersion": 1,
   "description": "Runtime allowlist for the current web client. Source/reference assets are intentionally excluded.",
   "entrypoints": [
-    "index.html",
-    "h5.html"
+    "index.html"
   ],
   "runtime": {
     "images": {
-      "backgrounds": [
-        "assets/bg/gaming_bg.jpg",
-        "assets/theme/cardback.png"
-      ],
-      "heroes": [
-        "assets/characters/zhuge_liang.png",
-        "assets/characters/diao_chan.png",
-        "assets/characters/han_xin.png",
-        "assets/characters/xiang_yu.png",
-        "assets/characters/lv_buwei.png",
-        "assets/characters/lian_po.png",
-        "assets/characters/wuzetian.png",
-        "assets/characters/hua_mulan.png",
-        "assets/characters/xi_shi.png",
-        "assets/characters/wang_zhaojun.png",
-        "assets/characters/shangguan_waner.png",
-        "assets/characters/li_qingzhao.png",
-        "assets/characters/fu_hao.png",
-        "assets/characters/mu_guiying.png",
-        "assets/characters/nv_wa.png",
-        "assets/characters/chang_e.png"
-      ],
       "h5Backgrounds": [
         "assets/h5/backgrounds/gaming_bg_1280.webp"
       ],
@@ -85,21 +62,6 @@
         "assets/h5/heroes/chang_e_320.webp",
         "assets/h5/heroes/chang_e_640.webp"
       ],
-      "cardRanks": [
-        "assets/rankb_02_20260705150419.png",
-        "assets/rankb_03_20260705150419.png",
-        "assets/rankb_04_20260705150419.png",
-        "assets/rankb_05_20260705150419.png",
-        "assets/rankb_06_20260705150419.png",
-        "assets/rankb_07_20260705150845.png",
-        "assets/rankb_08_20260705150845.png",
-        "assets/rankb_09_20260705150845.png",
-        "assets/rankb_10_20260705150845.png",
-        "assets/rankc_J_20260705154216.png",
-        "assets/rankc_Q_20260705154216.png",
-        "assets/rankc_K_20260705154216.png",
-        "assets/rankc_A_20260705154216.png"
-      ],
       "cardSuits": [
         "assets/card/lukai_spade.png",
         "assets/card/lukai_heart.png",
@@ -110,7 +72,6 @@
     "audio": {
       "bgmTracks": [
         "assets/audio/bgm/music_default.mp3",
-        "assets/audio/bgm/music_danji.mp3",
         "assets/audio/bgm/music_jifeng.mp3",
         "assets/audio/bgm/aozhan_online.mp3"
       ],
@@ -141,13 +102,6 @@
     "knownMismatchAction": "warn",
     "unexpectedMismatchAction": "error",
     "knownExtensionMismatches": {
-      "assets/characters/zhuge_liang.png": "jpeg",
-      "assets/characters/diao_chan.png": "jpeg",
-      "assets/characters/han_xin.png": "jpeg",
-      "assets/characters/xiang_yu.png": "jpeg",
-      "assets/characters/lv_buwei.png": "jpeg",
-      "assets/characters/lian_po.png": "jpeg",
-      "assets/theme/cardback.png": "jpeg",
       "assets/theme/seat_frame.png": "jpeg"
     }
   }

@@ -4,10 +4,8 @@ import { fileURLToPath } from 'node:url';
 
 import { BGM_TRACKS, SFX } from '../js/audio.js';
 import {
-  RANK_FACE_IMGS,
   SUIT_IMGS,
 } from '../js/game/config.js';
-import { HEROES } from '../js/game/heroes.js';
 import { SKILLS } from '../js/game/skills.js';
 import { H5_STATIC_PATHS } from '../js/services/asset-variants.js';
 
@@ -100,7 +98,7 @@ function cssAssetPaths(cssPath, source) {
 const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
 assert(manifest.schemaVersion === 1, 'runtime-manifest schemaVersion must be 1');
 assert(manifest.entrypoints?.includes('index.html'), 'runtime-manifest must declare index.html');
-assert(manifest.entrypoints?.includes('h5.html'), 'runtime-manifest must declare h5.html');
+assert(manifest.entrypoints?.length === 1, 'runtime-manifest must expose one canonical H5 entrypoint');
 
 const imageGroups = manifest.runtime?.images || {};
 const manifestImages = Object.values(imageGroups).flatMap((group) => (
@@ -148,16 +146,11 @@ for (const key of skillSfxKeys) {
   assert(key in SFX, `skill presentation references unregistered SFX key: ${key}`);
 }
 
-const cssPath = 'css/style.css';
-const cssSource = await readFile(toFsPath(cssPath), 'utf8');
 const sourceRuntimeAssets = new Set([
   ...BGM_TRACKS,
   ...Object.values(SFX),
-  ...HEROES.map((hero) => hero.portrait),
   ...H5_STATIC_PATHS,
-  ...Object.values(RANK_FACE_IMGS),
   ...Object.values(SUIT_IMGS),
-  ...cssAssetPaths(cssPath, cssSource),
 ]);
 sameValues(runtimeAssets, sourceRuntimeAssets, 'runtime asset manifest');
 

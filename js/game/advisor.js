@@ -3,6 +3,7 @@
 import * as Config from './config.js';
 import * as WinRate from './winrate.js';
 import { describe } from './handeval.js';
+import { tablePosition } from './ai-policy.js';
 import {
   drawProfile,
   effectiveStack,
@@ -22,18 +23,15 @@ function preflopHandText(hole) {
   return `${high}${low}${sorted[0].suit === sorted[1].suit ? 's' : 'o'}`;
 }
 
-function positionName(engine, player) {
-  const alive = engine.players.slice(1).filter((candidate) => candidate.alive);
-  const dealerPos = alive.findIndex((candidate) => candidate.idx === engine.dealerIdx);
-  const playerPos = alive.findIndex((candidate) => candidate.idx === player.idx);
-  if (dealerPos < 0 || playerPos < 0) return '未知位置';
-  const distance = (playerPos - dealerPos + alive.length) % alive.length;
-  if (distance === 0) return alive.length === 2 ? 'BTN/SB' : 'BTN';
-  if (distance === 1) return 'SB';
-  if (distance === 2) return 'BB';
-  if (distance === alive.length - 1) return 'CO';
-  if (distance === alive.length - 2) return alive.length >= 6 ? 'HJ' : 'MP';
-  return 'UTG';
+function positionContext(engine, player) {
+  const activeSeats = engine.players.slice(1)
+    .filter((candidate) => candidate.alive)
+    .map((candidate) => candidate.idx);
+  const position = tablePosition(player.idx, engine.dealerIdx, activeSeats);
+  return {
+    name: position.name === 'UNKNOWN' ? '未知位置' : position.name,
+    playersBehind: position.playersBehind,
+  };
 }
 
 function deterministicRoll(engine, player, tag) {
@@ -146,9 +144,9 @@ function analyzePreflop(engine, player, opts, context) {
     (engine.totalPot() - blinds.sb - blinds.bb) / Math.max(1, blinds.bb),
   ));
   const entryRangeText = limperCount > 0 ? '隔离/跟入范围' : '首入范围';
-  const playersBehind = {
-    UTG: 5, HJ: 4, MP: 4, CO: 3, BTN: 2, SB: 1, BB: 0, 'BTN/SB': 1,
-  }[context.position] ?? Math.max(0, context.numOpponents - 1);
+  const playersBehind = Number.isInteger(context.playersBehind)
+    ? context.playersBehind
+    : Math.max(0, context.numOpponents - 1);
   const premium = adjusted >= 0.84;
   const playable = adjusted >= 0.66;
   const marginal = adjusted >= 0.58;
@@ -387,10 +385,12 @@ export function analyzeDecision(engine, player, opts, { equity: suppliedEquity }
     && Number.isFinite(Number(suppliedEquity))
     ? clamp(Number(suppliedEquity))
     : estimateEquity(engine, player);
+  const position = positionContext(engine, player);
   const context = {
     equity,
     numOpponents,
-    position: positionName(engine, player),
+    position: position.name,
+    playersBehind: position.playersBehind,
     potOdds: opts.toCall / Math.max(1, engine.totalPot() + opts.toCall),
     spr: stack / pot,
     potBb: engine.totalPot() / bb,
