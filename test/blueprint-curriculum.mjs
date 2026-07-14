@@ -85,6 +85,24 @@ assert(compiledValueNode.actionValues?.some((entry) => entry.samples > 0));
 assert.equal(first.metadata.advantageGuard.enabled, true,
   'new curriculum checkpoints must fail closed behind the empirical advantage guard');
 
+const hybridCurriculum = trainBlueprintCurriculum({
+  tableSizes: [2],
+  rounds: [11],
+  stackBbs: [8],
+  iterationsPerConfig: 2,
+  minExactVisits: 1,
+  minBackoffVisits: 1,
+  seed: 'tiny-hybrid-tournament-curriculum',
+  utilityMode: 'hybrid-tournament',
+  tournamentRankWeight: 0.35,
+});
+assert.equal(hybridCurriculum.metadata.utilityMode, 'hybrid-tournament');
+assert.equal(hybridCurriculum.metadata.tournamentRankWeight, 0.35);
+assert.match(hybridCurriculum.metadata.trainingScope, /hybrid-tournament/);
+assert(hybridCurriculum.metadata.configurations.every(
+  (config) => config.utilityMode === 'hybrid-tournament',
+));
+
 const exactValueKey = keys.find((key) => (
   !key.includes('|bk=') && Object.keys(first.infosets[key].actionValues || {}).length > 0
 ));

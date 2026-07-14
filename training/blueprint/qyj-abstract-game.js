@@ -359,6 +359,8 @@ function normalizedConfig(options = {}) {
   const stackBb = Number(options.stackBb ?? 20);
   const maxRaisesPerStreet = Number(options.maxRaisesPerStreet ?? 3);
   const round = Number(options.round ?? 1);
+  const utilityMode = String(options.utilityMode ?? 'chip-ev');
+  const tournamentRankWeight = Number(options.tournamentRankWeight ?? 0.35);
   if (!Number.isInteger(tableSize) || tableSize < 2 || tableSize > 9) {
     throw new RangeError('QYJ abstract training tableSize must be 2..9');
   }
@@ -371,6 +373,15 @@ function normalizedConfig(options = {}) {
   if (!Number.isInteger(round) || round < 1 || round > 12) {
     throw new RangeError('QYJ abstract training round must be an integer in 1..12');
   }
+  if (!['chip-ev', 'hybrid-tournament', 'phase-aware-tournament'].includes(utilityMode)) {
+    throw new RangeError(
+      'utilityMode must be chip-ev, hybrid-tournament or phase-aware-tournament',
+    );
+  }
+  if (!Number.isFinite(tournamentRankWeight)
+    || tournamentRankWeight < 0 || tournamentRankWeight > 1) {
+    throw new RangeError('tournamentRankWeight must be in 0..1');
+  }
   return Object.freeze({
     tableSize,
     bb,
@@ -378,6 +389,8 @@ function normalizedConfig(options = {}) {
     stackBb,
     maxRaisesPerStreet,
     round,
+    utilityMode,
+    tournamentRankWeight,
     includeAllIn: options.includeAllIn !== false,
   });
 }
@@ -543,8 +556,25 @@ export class QyjAbstractHoldemGame {
       || zeroBasedPlayer >= this.playerCount) {
       throw new RangeError('utility() player is out of range');
     }
-    return (state.terminalStacks[zeroBasedPlayer] - state.initialStacks[zeroBasedPlayer])
-      / state.config.bb;
+    const chipUtility = (state.terminalStacks[zeroBasedPlayer]
+      - state.initialStacks[zeroBasedPlayer]) / state.config.bb;
+    const utilityMode = state.config.utilityMode ?? this.config.utilityMode ?? 'chip-ev';
+    if (utilityMode === 'chip-ev') return chipUtility;
+    const playerStack = state.terminalStacks[zeroBasedPlayer];
+    const better = state.terminalStacks.filter((stack) => stack > playerStack).length;
+    const tied = state.terminalStacks.filter((stack) => stack === playerStack).length;
+    const averageRank = better + (tied + 1) / 2;
+    const centeredRank = this.playerCount === 1 ? 0
+      : (this.playerCount + 1 - 2 * averageRank) / (this.playerCount - 1);
+    const rankUtility = centeredRank * state.config.stackBb;
+    const configuredWeight = Number(
+      state.config.tournamentRankWeight ?? this.config.tournamentRankWeight ?? 0.35,
+    );
+    const round = Number(state.config.round ?? this.config.round ?? 1);
+    const weight = utilityMode === 'phase-aware-tournament'
+      ? configuredWeight * (round - 1) / 11
+      : configuredWeight;
+    return chipUtility * (1 - weight) + rankUtility * weight;
   }
 
   infoSetKey(state, zeroBasedPlayer) {

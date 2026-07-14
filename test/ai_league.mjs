@@ -259,6 +259,54 @@ assert(JSON.stringify(deterministicView(replayBaseline))
   !== JSON.stringify(deterministicView(replayBranch)),
   'forced decision branch must be observable in the deterministic match record');
 
+const sequenceStart = replayTrace.find((record, index) => replayTrace.slice(index + 1).some(
+  (next) => next.entryId === record.entryId && next.round === record.round,
+));
+assert(sequenceStart, 'forced sequence fixture must expose a repeated same-hand actor');
+const sequenceContinuation = replayTrace.slice(replayTrace.indexOf(sequenceStart) + 1).find(
+  (record) => record.entryId === sequenceStart.entryId && record.round === sequenceStart.round,
+);
+assert(sequenceContinuation,
+  'forced sequence fixture must expose two same-player decisions in one hand');
+const sequenceTrace = [];
+runMatch({
+  assignment: passiveAssignment,
+  seed: 'forced-decision-replay',
+  onDecisionTrace: (record) => sequenceTrace.push(record),
+  forcedDecisionSequence: {
+    entryId: sequenceStart.entryId,
+    ordinal: sequenceStart.ordinal,
+    firstActionKey: sequenceStart.actionKey,
+    continuationActionKey: sequenceContinuation.actionKey,
+  },
+});
+const forcedSequenceRecords = sequenceTrace.filter((record) => record.forcedSequenceStep);
+assert(JSON.stringify(forcedSequenceRecords.map((record) => record.forcedSequenceStep))
+  === JSON.stringify(['start', 'continuation']),
+  'forced sequence replay must apply start then same-hand continuation');
+assert(forcedSequenceRecords[0].informationSetKey === sequenceStart.informationSetKey,
+  'forced sequence must begin at the identical public information set');
+
+const forcedHandStyleTrace = [];
+runMatch({
+  assignment: passiveAssignment,
+  seed: 'forced-hand-style-replay',
+  onDecisionTrace: (record) => forcedHandStyleTrace.push(record),
+  forcedHandStyle: {
+    entryId: 'calling-station#1',
+    round: 2,
+    styleKey: 'aggressive',
+  },
+});
+const forcedHandRows = forcedHandStyleTrace.filter((record) => record.handStyleForced);
+assert(forcedHandRows.length > 0
+  && forcedHandRows.every((record) => record.entryId === 'calling-station#1'
+    && record.round === 2 && record.forcedHandStyleKey === 'aggressive'),
+  'forced hand style must apply only to the requested player and complete hand');
+assert(forcedHandStyleTrace.some((record) => record.entryId === 'calling-station#1'
+  && record.round !== 2 && !record.handStyleForced),
+  'forced hand style must restore the baseline style outside the target hand');
+
 const calibrationMatch = runMatch({
   assignment: passiveAssignment,
   seed: 'belief-calibration-contract',

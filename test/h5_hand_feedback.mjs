@@ -4,9 +4,15 @@ import { describe, isPlayerMadeStrongHand } from '../js/game/handeval.js';
 import {
   classifyH5HandHit,
   classifyH5PremiumStartingHand,
+  shouldRenderH5PortraitReveal,
 } from '../js/ui/h5/battle-view.js';
 
 const card = (rank, suit) => ({ rank, suit });
+
+assert.equal(shouldRenderH5PortraitReveal(1, 1), false,
+  '主角亮牌只保留在专用手牌区，不重复覆盖头像');
+assert.equal(shouldRenderH5PortraitReveal(2, 1), true,
+  '其他玩家亮牌继续在各自头像框中展示');
 
 assert.deepEqual(
   classifyH5PremiumStartingHand([card(14, 1), card(12, 2)]),

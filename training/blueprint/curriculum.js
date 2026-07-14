@@ -319,6 +319,8 @@ export function curriculumConfigurations({
   rounds = [2, 5, 8, 11],
   stackBbs = [8, 20, 80],
   maxRaisesPerStreet = 3,
+  utilityMode = 'chip-ev',
+  tournamentRankWeight = 0.35,
 } = {}) {
   const players = integerList(tableSizes, 'tableSizes', 2, 9);
   const roundStages = integerList(rounds, 'rounds', 1, 12);
@@ -331,9 +333,19 @@ export function curriculumConfigurations({
     || maxRaisesPerStreet < 0 || maxRaisesPerStreet > 3) {
     throw new RangeError('maxRaisesPerStreet must be an integer in 0..3');
   }
+  if (!['chip-ev', 'hybrid-tournament', 'phase-aware-tournament'].includes(utilityMode)) {
+    throw new RangeError(
+      'utilityMode must be chip-ev, hybrid-tournament or phase-aware-tournament',
+    );
+  }
+  if (!Number.isFinite(Number(tournamentRankWeight))
+    || Number(tournamentRankWeight) < 0 || Number(tournamentRankWeight) > 1) {
+    throw new RangeError('tournamentRankWeight must be in 0..1');
+  }
   return Object.freeze(players.flatMap((tableSize) => roundStages.flatMap((round) => (
     stacks.map((stackBb) => Object.freeze({
       tableSize, round, stackBb, maxRaisesPerStreet,
+      utilityMode, tournamentRankWeight: Number(tournamentRankWeight),
     }))
   ))));
 }
@@ -507,6 +519,8 @@ export function trainBlueprintCurriculum({
   minBackoffVisits = 10,
   minBackoffRoots = 2,
   minPopulationRoots = 3,
+  utilityMode = 'chip-ev',
+  tournamentRankWeight = 0.35,
   onProgress = null,
 } = {}) {
   if (!Number.isInteger(iterationsPerConfig) || iterationsPerConfig < 0) {
@@ -517,7 +531,7 @@ export function trainBlueprintCurriculum({
     throw new RangeError('blendWeight must be in 0..1');
   }
   const configs = curriculumConfigurations({
-    tableSizes, rounds, stackBbs, maxRaisesPerStreet,
+    tableSizes, rounds, stackBbs, maxRaisesPerStreet, utilityMode, tournamentRankWeight,
   });
   const thresholds = publicationThresholds({
     minExactVisits,
@@ -562,8 +576,14 @@ export function trainBlueprintCurriculum({
       iterations: iterationsPerConfig * configs.length,
       iterationsPerConfig,
       maxRaisesPerStreet,
+      utilityMode,
+      tournamentRankWeight: Number(tournamentRankWeight),
       utilitySamples,
-      trainingScope: 'multi-size-multi-round-single-hand-no-skill',
+      trainingScope: utilityMode === 'phase-aware-tournament'
+        ? 'multi-size-multi-round-single-hand-phase-aware-tournament-no-skill'
+        : utilityMode === 'hybrid-tournament'
+        ? 'multi-size-multi-round-single-hand-hybrid-tournament-no-skill'
+        : 'multi-size-multi-round-single-hand-no-skill',
       advantageGuard: advantageGuardMetadata(),
       publication: publicationMetadata(
         thresholds,
@@ -572,7 +592,11 @@ export function trainBlueprintCurriculum({
       ),
       configurations: configs,
       limitations: [
-        'single-hand utility rather than the complete 12-round tournament value',
+        utilityMode === 'phase-aware-tournament'
+          ? 'single-hand phase-aware chip/rank proxy rather than the complete 12-round tournament value'
+          : utilityMode === 'hybrid-tournament'
+          ? 'single-hand chip/rank proxy rather than the complete 12-round tournament value'
+          : 'single-hand utility rather than the complete 12-round tournament value',
         'hero skills and energy are disabled',
         'multiplayer regret minimisation has no Nash convergence guarantee',
       ],

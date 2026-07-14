@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 import {
+  evaluatePublicBeliefOptionPlans,
   evaluatePublicBeliefRolloutActions,
   evaluateScreenedPublicBeliefRolloutActions,
 } from '../training/eval/public-belief-rollout.mjs';
@@ -82,11 +83,54 @@ const dual = evaluatePublicBeliefRolloutActions(target, {
 assert.equal(dual.utilityMode, 'dual-tournament');
 assert.equal(dual.provenance.utilityObjective,
   'paired-hp-and-risk-adjusted-tournament-value-lcb');
+assert.equal(dual.provenance.tournamentGateStatistic, 'lowerBound');
 assert(dual.candidates.every((candidate) => (
   Number.isFinite(candidate.hp.mean)
   && Number.isFinite(candidate.tournament.mean)
   && Number.isFinite(candidate.tournament.lowerBound)
 )));
+
+const dualScreened = evaluateScreenedPublicBeliefRolloutActions(target, {
+  ...screenedOptions,
+  actionKeys: legal.slice(0, 2),
+  baseActionKey: legal[0],
+  seedNamespace: 'screened-public-belief-dual-tournament-self-test',
+  screenUtilityMode: 'dual-tournament',
+  confirmationUtilityMode: 'dual-tournament',
+  tournamentValueModel,
+  tournamentRiskWeight: 0.25,
+  minTournamentAdvantage: 0,
+});
+assert.equal(dualScreened.screenUtilityMode, 'dual-tournament');
+assert.equal(dualScreened.screen.utilityMode, 'dual-tournament');
+assert.equal(dualScreened.screen.provenance.utilityObjective,
+  'paired-hp-and-risk-adjusted-tournament-value-lcb');
+if (dualScreened.confirmation) {
+  assert.equal(dualScreened.confirmation.utilityMode, 'dual-tournament');
+}
+
+const meanScreened = evaluateScreenedPublicBeliefRolloutActions(target, {
+  ...screenedOptions,
+  actionKeys: legal.slice(0, 2),
+  baseActionKey: legal[0],
+  seedNamespace: 'screened-public-belief-mean-tournament-self-test',
+  screenUtilityMode: 'dual-tournament',
+  confirmationUtilityMode: 'dual-tournament',
+  screenTournamentGateStatistic: 'mean',
+  confirmationTournamentGateStatistic: 'lowerBound',
+  screenCandidateCount: 2,
+  tournamentValueModel,
+  tournamentRiskWeight: 0.25,
+  minTournamentAdvantage: 0,
+});
+assert.equal(meanScreened.screen.provenance.tournamentGateStatistic, 'mean');
+assert.equal(meanScreened.screen.provenance.utilityObjective,
+  'paired-hp-lcb-and-risk-adjusted-tournament-value-mean');
+assert(meanScreened.screenCandidateActionKeys.length <= 2);
+if (meanScreened.accepted) {
+  assert.equal(meanScreened.actionKey, meanScreened.confirmation.actionKey);
+  assert(meanScreened.screenCandidateActionKeys.includes(meanScreened.actionKey));
+}
 
 const survivalAware = evaluatePublicBeliefRolloutActions(target, {
   ...options,
@@ -108,6 +152,69 @@ assert(survivalAware.candidates.every((candidate) => (
   && Number.isFinite(candidate.survival.mean)
   && Number.isFinite(candidate.survival.lowerBound)
 )));
+
+const tripleAware = evaluatePublicBeliefRolloutActions(target, {
+  ...options,
+  actionKeys: legal.slice(0, 2),
+  baseActionKey: legal[0],
+  seedNamespace: 'public-belief-triple-tournament-survival-self-test',
+  continuationEquityScale: 0.08,
+  continuationEquityFloor: 24,
+  utilityMode: 'triple-tournament-survival',
+  tournamentValueModel,
+  minTournamentAdvantage: 0,
+  minSurvivalAdvantage: 0,
+});
+assert.equal(tripleAware.utilityMode, 'triple-tournament-survival');
+assert.equal(tripleAware.provenance.utilityObjective,
+  'paired-hp-tournament-and-hand-survival-lowerBound');
+assert(tripleAware.candidates.every((candidate) => (
+  Number.isFinite(candidate.hp.lowerBound)
+  && Number.isFinite(candidate.tournament.lowerBound)
+  && Number.isFinite(candidate.survival.lowerBound)
+)));
+
+const optionPlans = [
+  { id: `${legal[0]}|qyz`, firstActionKey: legal[0], continuationMode: null },
+  { id: `${legal[0]}|control`, firstActionKey: legal[0], continuationMode: 'control' },
+  { id: `${legal[0]}|pressure`, firstActionKey: legal[0], continuationMode: 'pressure' },
+  { id: `${legal[0]}|thin-value`, firstActionKey: legal[0], continuationMode: 'thin-value' },
+  { id: `${legal[0]}|polarized`, firstActionKey: legal[0], continuationMode: 'polarized' },
+];
+const optionPlanOptions = {
+  basePlanId: optionPlans[0].id,
+  plans: optionPlans,
+  seedNamespace: 'public-belief-two-step-option-self-test',
+  clusterCount: 3,
+  continuationMode: 'fast-public',
+  continuationEquityScale: 0.08,
+  continuationEquityFloor: 24,
+  minAdvantage: 1,
+  tournamentValueModel,
+  tournamentGateStatistic: 'mean',
+  hpGateStatistic: 'mean',
+  survivalGateStatistic: 'lowerBound',
+  minContinuationReachRate: 0.5,
+};
+const optionPlan = evaluatePublicBeliefOptionPlans(target, optionPlanOptions);
+const optionPlanAgain = evaluatePublicBeliefOptionPlans(target, optionPlanOptions);
+assert.deepEqual(optionPlanAgain, optionPlan,
+  'two-step option evaluation must reproduce root and continuation samples');
+assert.equal(optionPlan.schema, 'qyj-public-belief-two-step-option-v1');
+assert.equal(optionPlan.minContinuationReachRate, 0.5);
+assert.equal(optionPlan.hpGateStatistic, 'mean');
+assert(optionPlan.candidates.every((candidate) => (
+  Number.isFinite(candidate.hp.lowerBound)
+  && Number.isFinite(candidate.tournament.lowerBound)
+  && Number.isFinite(candidate.survival.lowerBound)
+  && candidate.continuationReachRate >= 0
+  && candidate.continuationReachRate <= 1
+  && candidate.validClusterCount === optionPlan.clusterCount
+  && candidate.validClusterRate === 1
+)));
+assert(optionPlan.eligibleCandidates.every(
+  (candidate) => candidate.continuationReachRate >= optionPlan.minContinuationReachRate,
+));
 
 const capped = evaluateConfirmationConfidenceCap({
   accepted: true,

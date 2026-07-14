@@ -100,6 +100,8 @@ export class OnlineSession {
     this.retryDelays = [...retryDelays];
     this.retryAttempt = 0;
     this.reconnectTimer = null;
+    this.battleLeaveTimer = null;
+    this.pendingBattleLeave = null;
     this.transportOpen = false;
     this.everConnected = false;
     this.recovering = false;
@@ -241,6 +243,54 @@ export class OnlineSession {
     this.reconnectTimer = null;
   }
 
+  clearBattleLeaveTimer() {
+    if (this.battleLeaveTimer != null) clearTimeout(this.battleLeaveTimer);
+    this.battleLeaveTimer = null;
+  }
+
+  clearPendingBattleLeave() {
+    this.clearBattleLeaveTimer();
+    this.pendingBattleLeave = null;
+  }
+
+  restoreBattleAfterLeaveFailure(message = '离开牌局失败，请重试', code = 'LEAVE_FAILED') {
+    const pending = this.pendingBattleLeave;
+    if (!pending) return false;
+    this.clearPendingBattleLeave();
+    this.battle = pending.battle;
+    this.publish({
+      screen: 'battle',
+      data: pending.data,
+      battle: this.battle,
+      connection: 'open',
+      recovering: false,
+      writeBlocked: false,
+      error: { code, message },
+    });
+    this.pushNotice(`离房失败，已恢复当前牌局：${message}`, {
+      kind: 'error', key: `leave-failed-${code}-${message}`,
+    });
+    return true;
+  }
+
+  startBattleLeaveWatchdog() {
+    this.clearBattleLeaveTimer();
+    this.battleLeaveTimer = setTimeout(() => {
+      this.battleLeaveTimer = null;
+      if (this.destroyed || !this.pendingBattleLeave) return;
+      // A lost lobby acknowledgement is recoverable by explicitly requesting
+      // the authoritative lobby snapshot once more.
+      if (this.transportOpen) this.sendObject({ cmd: 'lobby' });
+      this.battleLeaveTimer = setTimeout(() => {
+        this.battleLeaveTimer = null;
+        if (this.destroyed || !this.pendingBattleLeave) return;
+        // Reconnecting resolves both possible server states: already detached
+        // returns to lobby, while an unprocessed leave restores the live game.
+        this.reconnect();
+      }, 2500);
+    }, 1500);
+  }
+
   reconnectPatch(text, connection = 'reconnecting') {
     const patch = {
       connection,
@@ -351,6 +401,7 @@ export class OnlineSession {
       return;
     }
     if (!authenticated) {
+      this.clearPendingBattleLeave();
       this.authenticated = false;
       this.account = null;
       this.recovering = false;
@@ -397,6 +448,7 @@ export class OnlineSession {
     }
 
     if (attemptedResume) {
+      this.clearPendingBattleLeave();
       this.recovering = false;
       this.battle?.destroy();
       this.battle = null;
@@ -418,6 +470,7 @@ export class OnlineSession {
   }
 
   handleResumeResult(data) {
+    this.clearPendingBattleLeave();
     const ranking = resultRanking(Array.isArray(data.ranking) ? data.ranking : []);
     const mySeat = Number(data.mySeat) || 1;
     const tableSize = resolveTableSize(data.tableSize, data.ranking);
@@ -451,6 +504,7 @@ export class OnlineSession {
       if (data.player) this.applyPlayerProfile(data.player, false);
       this.myName = data.yourName || this.myName;
       if (this.state.screen === 'connecting' || this.state.screen === 'lobby' || this.recovering) {
+        this.clearPendingBattleLeave();
         this.battle?.destroy();
         this.battle = null;
         const recovered = this.recovering;
@@ -495,6 +549,7 @@ export class OnlineSession {
       return;
     }
     if (ev === 'gameStart') {
+      this.clearPendingBattleLeave();
       const startData = authoritativeGameStart({
         ...data,
         tableSize: resolveTableSize(data.tableSize, data.players),
@@ -531,6 +586,7 @@ export class OnlineSession {
     if (ev === 'error') {
       const messageText = String(data.message || '服务器拒绝了本次操作');
       if (['AUTH_REQUIRED', 'AUTH_SESSION_INVALID'].includes(data.code)) {
+        this.clearPendingBattleLeave();
         this.resumeToken = '';
         writeResumeToken(this.tokenStorage, '');
         this.authenticated = false;
@@ -545,6 +601,10 @@ export class OnlineSession {
           error: { code: data.code, message: messageText },
           writeBlocked: false,
         });
+        return;
+      }
+      if (this.pendingBattleLeave) {
+        this.restoreBattleAfterLeaveFailure(messageText, data.code || 'LEAVE_FAILED');
         return;
       }
       const profileError = [
@@ -856,11 +916,32 @@ export class OnlineSession {
   }
   refreshLobby() { return this.send('lobby'); }
   joinTeam(teamId) { return this.send('join', { teamId: Number(teamId) }); }
+  rejoinGame(teamId) {
+    if (this.state.writeBlocked || this.state.connection !== 'open') return false;
+    this.showConnecting('正在重新接管旧牌局…');
+    return this.sendObject({ cmd: 'rejoinGame', teamId: Number(teamId) });
+  }
   rename(name) { return this.send('rename', { name: String(name || '').trim() }); }
   leaveTeam() {
     if (this.state.writeBlocked || this.state.connection !== 'open') return false;
     this.showConnecting('正在退出队伍…');
     return this.sendObject({ cmd: 'leave' });
+  }
+  leaveBattle({ managed = true } = {}) {
+    if (this.state.writeBlocked || this.state.connection !== 'open') return false;
+    const battle = this.battle;
+    this.pendingBattleLeave = { battle, data: this.state.data, managed };
+    this.showConnecting(
+      managed ? '正在离开牌局并启用系统托管…' : '正在离开牌局…',
+      { battle },
+    );
+    const sent = this.sendObject({ cmd: 'leave' });
+    if (!sent) {
+      this.restoreBattleAfterLeaveFailure('离房请求未能发送', 'SEND_FAILED');
+      return false;
+    }
+    this.startBattleLeaveWatchdog();
+    return true;
   }
   startPick() { return this.send('startPick'); }
   pickHero(heroId) { return this.send('pick', { heroId }); }
@@ -881,6 +962,7 @@ export class OnlineSession {
     if (this.destroyed) return;
     this.destroyed = true;
     this.clearReconnectTimer();
+    this.clearPendingBattleLeave();
     this.settleProfileUpdate({
       ok: false,
       saved: false,

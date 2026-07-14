@@ -2,6 +2,10 @@ import { assertBattleEngineContract } from '../js/session/battle-session.js';
 import { createRemoteBattleSession } from '../js/session/remote-battle-session.js';
 import { createOnlineSession } from '../js/session/online-session.js';
 import { HEROES } from '../js/game/heroes.js';
+import {
+  battleLeaveRequiresConfirmation,
+  requestOnlineBattleLeave,
+} from '../js/ui/h5/app.js';
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(`BattleSession 契约失败：${message}`);
@@ -28,6 +32,25 @@ const startData = {
     } : {}),
   })),
 };
+assert(battleLeaveRequiresConfirmation({ engine: { players: [null, { alive: true }] } }, 1),
+  '存活玩家离开牌局前需要确认托管');
+assert(!battleLeaveRequiresConfirmation({ engine: { players: [null, { alive: false }] } }, 1),
+  '阵亡玩家离开牌局不应显示托管确认');
+assert(battleLeaveRequiresConfirmation(null, 1), '状态未知时必须保留安全确认');
+let deadLeaveOptions = null;
+const deadLeaveResult = requestOnlineBattleLeave({
+  root: { appendChild() { throw new Error('阵亡离房不应创建确认弹窗'); } },
+  battle: { engine: { players: [null, { alive: false }] } },
+  mySeat: 1,
+  onlineSession: {
+    leaveBattle(options) {
+      deadLeaveOptions = options;
+      return true;
+    },
+  },
+});
+assert(deadLeaveResult === true && deadLeaveOptions?.managed === false,
+  '阵亡玩家应跳过弹窗并直接离房，且不显示托管状态');
 const commands = [];
 const remote = createRemoteBattleSession(startData, (command) => commands.push(command));
 assertBattleEngineContract(remote.rawEngine, 'RemoteEngine');
@@ -345,6 +368,21 @@ assert(online.getState().battle === retainedBattle, '恢复完成仍使用原 ba
 assert([...resumeStorage.values.values()].includes('token-2'), '恢复成功后轮换 sessionStorage 令牌');
 const restoredNotice = online.getState().notice;
 assert(restoredNotice?.message === '已恢复至最新进度', '恢复成功统一提示');
+
+assert(online.leaveBattle({ managed: true }), '中途离房请求应成功发送');
+assert(online.getState().screen === 'connecting'
+  && online.getState().battle === retainedBattle,
+'等待服务端确认期间必须保留原 battle，不能提前销毁导致卡死');
+fakeClient.message({
+  ev: 'error',
+  a: { code: 'INVALID_ROOM_PHASE', message: '服务端暂未接受离房' },
+});
+assert(online.getState().screen === 'battle'
+  && online.getState().battle === retainedBattle
+  && !online.getState().writeBlocked,
+'离房失败必须自动恢复原牌局并解除写锁');
+assert(online.getState().notice?.message.includes('已恢复当前牌局'),
+  '离房失败应给出明确恢复提示');
 
 fakeClient.message({ ev: 'error', a: { code: 'HERO_TAKEN', message: '该英雄已被占用' } });
 const errorNoticeId = online.getState().notice.id;

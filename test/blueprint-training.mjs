@@ -49,6 +49,54 @@ for (const tableSize of [2, 3, 6, 9]) {
   }
 }
 
+const hybridUtilityGame = new QyjAbstractHoldemGame({
+  tableSize: 6,
+  stackBb: 12,
+  maxRaisesPerStreet: 1,
+  utilityMode: 'hybrid-tournament',
+  tournamentRankWeight: 0.35,
+});
+const hybridUtilityRng = new SerializableRng('hybrid-tournament-utility');
+for (let hand = 0; hand < 12; hand++) {
+  let state = hybridUtilityGame.createInitialState(hybridUtilityRng);
+  while (!state.terminal) {
+    const actions = hybridUtilityGame.legalActions(state);
+    state = hybridUtilityGame.nextState(state, actions[hybridUtilityRng.int(actions.length)]);
+  }
+  const utilitySum = Array.from(
+    { length: hybridUtilityGame.playerCount },
+    (_, player) => hybridUtilityGame.utility(state, player),
+  ).reduce((sum, value) => sum + value, 0);
+  assert(Math.abs(utilitySum) < 1e-8,
+    'hybrid chip/rank tournament proxy must remain zero-sum');
+}
+assert.throws(() => new QyjAbstractHoldemGame({ utilityMode: 'unknown' }), /utilityMode/);
+assert.throws(() => new QyjAbstractHoldemGame({
+  utilityMode: 'hybrid-tournament', tournamentRankWeight: 1.1,
+}), /tournamentRankWeight/);
+
+const phaseAwareEarlyGame = new QyjAbstractHoldemGame({
+  tableSize: 3,
+  stackBb: 10,
+  round: 1,
+  maxRaisesPerStreet: 1,
+  utilityMode: 'phase-aware-tournament',
+  tournamentRankWeight: 0.35,
+});
+let phaseAwareEarlyState = phaseAwareEarlyGame.createInitialState(
+  new SerializableRng('phase-aware-early'),
+);
+while (!phaseAwareEarlyState.terminal) {
+  const actions = phaseAwareEarlyGame.legalActions(phaseAwareEarlyState);
+  phaseAwareEarlyState = phaseAwareEarlyGame.nextState(phaseAwareEarlyState, actions[0]);
+}
+for (let player = 0; player < phaseAwareEarlyGame.playerCount; player++) {
+  const chipUtility = (phaseAwareEarlyState.terminalStacks[player]
+    - phaseAwareEarlyState.initialStacks[player]) / phaseAwareEarlyGame.config.bb;
+  assert.equal(phaseAwareEarlyGame.utility(phaseAwareEarlyState, player), chipUtility,
+    'phase-aware rank weight must start at zero in round one');
+}
+
 // Split pots use the production Engine's integer-chip rule independently for
 // every layer.  The odd chip starts after the public dealer even when the
 // surviving hand occupies non-contiguous seats of a larger physical ring.

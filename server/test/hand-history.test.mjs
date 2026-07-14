@@ -44,6 +44,11 @@ function firstHand(one, two) {
         hole: [C(10, 4), C(8, 1)], publicHole: [C(10, 4), null],
         folded: true, allIn: false, netResult: -20, wonAmount: 0,
       },
+      {
+        seat: 4, playerName: 'AI·阵亡席位', heroId: 'xiangyu',
+        hole: [null, null], publicHole: [null, null],
+        folded: false, allIn: false, netResult: 0, wonAmount: 0,
+      },
     ],
   };
 }
@@ -62,6 +67,7 @@ test('逐局牌谱按本人权限裁剪：自己的牌完整、弃牌对手隐�
     const oneHistory = store.getHandHistory(one.playerId);
     assert.equal(oneHistory.items.length, 1);
     assert.equal(oneHistory.items[0].roomId, 1288);
+    assert.ok(Number.isInteger(oneHistory.items[0].id) && oneHistory.items[0].id > 0, '每手牌应返回数据库唯一局号');
     assert.equal(oneHistory.items[0].roomName, '青龙殿·牌谱测试');
     assert.equal(oneHistory.items[0].round, 1);
     assert.equal(oneHistory.items[0].selfNetResult, -40);
@@ -69,6 +75,7 @@ test('逐局牌谱按本人权限裁剪：自己的牌完整、弃牌对手隐�
     assert.deepEqual(oneHistory.items[0].players[0].hole, hand.players[0].hole, '本人弃牌后仍可看自己的底牌');
     assert.deepEqual(oneHistory.items[0].players[1].hole, hand.players[1].hole, '实际摊牌的对手应公开两张');
     assert.deepEqual(oneHistory.items[0].players[2].hole, [C(10, 4), null], '只公开一张时不得泄露另一张');
+    assert.equal(oneHistory.items[0].players[3].participated, false, '阵亡座位应保留且标记为本局未参与');
 
     const twoHistory = store.getHandHistory(two.playerId);
     assert.deepEqual(twoHistory.items[0].players[0].hole, [null, null], '弃牌对手的底牌必须保持隐藏');
@@ -77,7 +84,7 @@ test('逐局牌谱按本人权限裁剪：自己的牌完整、弃牌对手隐�
     assert.deepEqual(store.getHandHistory(outsider.playerId).items, [], '局外账号不能查询该手牌');
 
     assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM poker_hand_records').get().count, 1);
-    assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM poker_hand_record_players').get().count, 3);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM poker_hand_record_players').get().count, 4);
   } finally {
     store.close();
   }
@@ -123,6 +130,7 @@ test('牌谱支持游标分页，并在 schema v5 数据库上原地新增 v6 �
     assert.ok(pageOne.nextCursor);
     const pageTwo = store.getHandHistory(one.playerId, { limit: 1, beforeId: pageOne.nextCursor });
     assert.equal(pageTwo.items[0].round, 1);
+    assert.notEqual(pageOne.items[0].id, pageTwo.items[0].id, '不同牌局记录必须拥有不同唯一局号');
     store.close();
 
     store = createPlayerStore({ databasePath });

@@ -23,6 +23,9 @@ Options:
   --stack-bbs <8,20,80>      Effective-stack curriculum
   --iterations N             MCCFR iterations per configuration (default: 100)
   --max-raises N             Blueprint action-abstraction cap, 0..3 (default: 3)
+  --utility-mode <chip-ev|hybrid-tournament|phase-aware-tournament>
+                              Training utility (default: chip-ev)
+  --tournament-rank-weight N Hybrid rank-proxy weight, 0..1 (default: 0.35)
   --seed TEXT                Deterministic root seed
   --blend-weight N           Runtime mixture request, 0..1 (default: 0.25)
   --min-exact-visits N       Publish exact nodes from N visits (default: 50)
@@ -48,6 +51,8 @@ function parseArgs(argv) {
     stackBbs: [8, 20, 80],
     iterationsPerConfig: 100,
     maxRaisesPerStreet: 3,
+    utilityMode: 'chip-ev',
+    tournamentRankWeight: 0.35,
     seed: 'qyj-blueprint-v2-curriculum',
     blendWeight: 0.25,
     minExactVisits: 50,
@@ -69,6 +74,10 @@ function parseArgs(argv) {
     else if (flag === '--stack-bbs') args.stackBbs = list(valueAfter(index++, flag), flag);
     else if (flag === '--iterations') args.iterationsPerConfig = Number(valueAfter(index++, flag));
     else if (flag === '--max-raises') args.maxRaisesPerStreet = Number(valueAfter(index++, flag));
+    else if (flag === '--utility-mode') args.utilityMode = valueAfter(index++, flag);
+    else if (flag === '--tournament-rank-weight') {
+      args.tournamentRankWeight = Number(valueAfter(index++, flag));
+    }
     else if (flag === '--seed') args.seed = valueAfter(index++, flag);
     else if (flag === '--blend-weight') args.blendWeight = Number(valueAfter(index++, flag));
     else if (flag === '--min-exact-visits') args.minExactVisits = Number(valueAfter(index++, flag));

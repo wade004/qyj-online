@@ -895,14 +895,15 @@ function normalizeHistoryPlayer(value, tableSize) {
   if (!Array.isArray(value.hole) || value.hole.length !== 2) {
     validationError('INVALID_HAND_HISTORY', '底牌必须包含两张牌');
   }
-  const hole = value.hole.map((card) => normalizeHistoryCard(card));
+  const hole = value.hole.map((card) => normalizeHistoryCard(card, { nullable: true }));
   const publicHoleInput = value.publicHole == null ? [null, null] : value.publicHole;
   if (!Array.isArray(publicHoleInput) || publicHoleInput.length !== 2) {
     validationError('INVALID_HAND_HISTORY', '公开底牌必须包含两个牌位');
   }
   const publicHole = publicHoleInput.map((card, index) => {
     const normalized = normalizeHistoryCard(card, { nullable: true });
-    if (normalized && historyCardKey(normalized) !== historyCardKey(hole[index])) {
+    if (normalized && (!hole[index]
+      || historyCardKey(normalized) !== historyCardKey(hole[index]))) {
       validationError('INVALID_HAND_HISTORY', '公开底牌必须与原始底牌一致');
     }
     return normalized;
@@ -954,6 +955,7 @@ function normalizeHandHistoryRecord(record, now) {
   }
   const seenCards = new Set();
   for (const card of [...board, ...players.flatMap((player) => player.hole)]) {
+    if (!card) continue;
     const key = historyCardKey(card);
     if (seenCards.has(key)) validationError('INVALID_HAND_HISTORY', '牌局记录包含重复实体牌');
     seenCards.add(key);
@@ -1950,6 +1952,7 @@ export class PlayerStore {
           heroId: participant.hero_id,
           isYou,
           hole,
+          participated: rawHole.some(Boolean),
           visibleCardCount: hole.filter(Boolean).length,
           folded: Boolean(participant.folded),
           allIn: Boolean(participant.all_in),

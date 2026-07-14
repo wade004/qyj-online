@@ -19,6 +19,7 @@ const value = (flag, fallback = null) => {
 };
 const tableSize = Number(value('--table', 6));
 const seedCount = Number(value('--seeds', 4));
+const seedOffset = Number(value('--seed-offset', 0));
 const targetsPerMatch = Number(value('--targets-per-match', 1));
 const alternativesPerTarget = Number(value('--alternatives-per-target', 1));
 const output = path.resolve(value('--output', 'training/artifacts/forced-branches.json'));
@@ -26,16 +27,27 @@ const namespace = String(value('--seed-namespace', 'qyj-forced-decision-v1'));
 const targetSignaturePath = value('--target-signature');
 const targetSignature = targetSignaturePath
   ? JSON.parse(fs.readFileSync(path.resolve(targetSignaturePath), 'utf8')) : null;
+const targetSignatures = targetSignature?.schema === 'qyj-forced-action-target-set-v1'
+  ? targetSignature.targets : (targetSignature ? [targetSignature] : []);
 const forceBestEv = args.includes('--force-best-ev');
 const minNormalizedEvGap = Number(value('--min-normalized-ev-gap', 0));
+const targetStreets = new Set(String(value('--streets', 'preflop,flop,turn,river'))
+  .split(',').map((item) => item.trim()).filter(Boolean));
+const excludedActions = new Set(String(value('--exclude-actions', ''))
+  .split(',').map((item) => item.trim()).filter(Boolean));
 const secretName = value('--cluster-secret');
 if (!secretName || !process.env[secretName] || Buffer.byteLength(process.env[secretName]) < 32) {
   throw new RangeError('--cluster-secret must name an environment value of at least 32 bytes');
 }
 if (![6, 9].includes(tableSize) || !Number.isSafeInteger(seedCount) || seedCount < 2
+  || !Number.isSafeInteger(seedOffset) || seedOffset < 0
   || !Number.isSafeInteger(targetsPerMatch) || targetsPerMatch < 1
   || !Number.isSafeInteger(alternativesPerTarget) || alternativesPerTarget < 1) {
   throw new RangeError('invalid forced-decision evaluation limits');
+}
+if (!targetStreets.size
+  || [...targetStreets].some((street) => !['preflop', 'flop', 'turn', 'river'].includes(street))) {
+  throw new RangeError('--streets must contain preflop, flop, turn, or river');
 }
 const defaultLineup = tableSize === 6
   ? ['qyz', 'qyz-tight', 'qyz-aggressive', 'calling-station', 'random-legal', 'qyz-loose']
@@ -48,8 +60,15 @@ const assignments = buildSeatAssignments(lineup, {
 });
 const targetEntry = lineup.find((entry) => entry.strategy === 'qyz');
 if (!targetEntry) throw new RangeError('lineup requires one qyz target');
+if (targetSignature && (!Array.isArray(targetSignatures) || !targetSignatures.length
+  || targetSignatures.some((target) => Number(target.tableSize || tableSize) !== tableSize
+    || !target.features || !target.baselineActionKey || !target.actionKey)
+  || targetSignatures.some((target) => JSON.stringify(Object.keys(target.features))
+    !== JSON.stringify(Object.keys(targetSignatures[0].features))))) {
+  throw new TypeError('invalid forced action target signature or inconsistent feature fields');
+}
 const featureOrder = targetSignature
-  ? Object.keys(targetSignature.features || {})
+  ? Object.keys(targetSignatures[0].features || {})
   : tableSize === 6 ? ['s', 'p', 'ip'] : ['s', 'n', 'p', 'ip', 'cl'];
 const secret = process.env[secretName];
 const records = new Map();
@@ -65,8 +84,9 @@ const lowerBound = (values) => {
 };
 let branchCount = 0;
 for (let seedIndex = 0; seedIndex < seedCount; seedIndex++) {
-  const seedCluster = `${namespace}:${seedIndex + 1}`;
-  const dealSeed = deriveSeed(namespace, 'deal', seedIndex);
+  const groupNumber = seedOffset + seedIndex + 1;
+  const seedCluster = `${namespace}:${groupNumber}`;
+  const dealSeed = deriveSeed(namespace, 'deal', seedOffset + seedIndex);
   const clusterId = `fc_${createHmac('sha256', secret).update(seedCluster).digest('hex')}`;
   for (const assignment of assignments) {
     const trace = [];
@@ -78,17 +98,20 @@ for (let seedIndex = 0; seedIndex < seedCount; seedIndex++) {
     const targets = trace.filter((row) => {
       if (row.entryId !== targetEntry.id
         || !row.legalActionKeys.some((action) => action !== row.actionKey)) return false;
+      const publicFeatures = compactResidualFeatures(row.informationSetKey);
+      if (!publicFeatures || !targetStreets.has(publicFeatures.features.s)) return false;
       if (forceBestEv) return row.bestEvActionKey
         && row.bestEvActionKey !== row.actionKey
         && row.legalActionKeys.includes(row.bestEvActionKey)
         && Number(row.normalizedBestEvGap) >= minNormalizedEvGap;
       if (!targetSignature) return true;
       const encoded = compactResidualFeatures(row.informationSetKey);
-      return encoded?.mask === targetSignature.mask
-        && row.actionKey === targetSignature.baselineActionKey
-        && Object.entries(targetSignature.features || {}).every(([feature, featureValue]) => (
+      return targetSignatures.some((target) => (target.mask == null || encoded?.mask === target.mask)
+        && row.actionKey === target.baselineActionKey
+        && row.legalActionKeys.includes(target.actionKey)
+        && Object.entries(target.features || {}).every(([feature, featureValue]) => (
           encoded.features[feature] === featureValue
-        ));
+        )));
     })
       .sort((left, right) => createHash('sha256').update(
         `${seedCluster}|${assignment.key}|${left.ordinal}|${left.informationSetKey}`,
@@ -98,12 +121,20 @@ for (let seedIndex = 0; seedIndex < seedCount; seedIndex++) {
     for (const target of targets) {
       const encoded = compactResidualFeatures(target.informationSetKey);
       if (!encoded) continue;
-      const alternatives = forceBestEv
+      const alternatives = (forceBestEv
         ? [target.bestEvActionKey]
         : targetSignature
-        ? target.legalActionKeys.filter((action) => action === targetSignature.actionKey)
-        : target.legalActionKeys.filter((action) => action !== target.actionKey)
-          .slice(0, alternativesPerTarget);
+        ? targetSignatures.filter((signature) => (
+          (signature.mask == null || encoded.mask === signature.mask)
+          && target.actionKey === signature.baselineActionKey
+          && target.legalActionKeys.includes(signature.actionKey)
+          && Object.entries(signature.features).every(([feature, featureValue]) => (
+            encoded.features[feature] === featureValue
+          ))
+        )).map((signature) => signature.actionKey)
+        : target.legalActionKeys.filter((action) => action !== target.actionKey))
+        .filter((action) => !excludedActions.has(action))
+        .slice(0, alternativesPerTarget);
       for (const actionKey of alternatives) {
         const branch = runMatch({
           assignment, seed: dealSeed, seedGroup: seedCluster,
@@ -164,8 +195,11 @@ const artifact = {
   tableSize,
   featureOrder,
   seedClusters: seedCount,
+  seedOffset,
   assignments: assignments.length,
   branchCount,
+  targetStreets: [...targetStreets].sort(),
+  excludedActions: [...excludedActions].sort(),
   sourceGroupSecretId: `fs_${createHash('sha256').update(secret).digest('hex')}`,
   records: serialized,
   global: (() => {

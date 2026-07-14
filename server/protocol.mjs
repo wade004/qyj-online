@@ -35,6 +35,7 @@ export const ERROR_CODES = Object.freeze({
   HERO_TAKEN: 'HERO_TAKEN',
   PICKS_INCOMPLETE: 'PICKS_INCOMPLETE',
   GAME_NOT_FOUND: 'GAME_NOT_FOUND',
+  GAME_NOT_REJOINABLE: 'GAME_NOT_REJOINABLE',
   NOT_YOUR_TURN: 'NOT_YOUR_TURN',
   INVALID_ACTION: 'INVALID_ACTION',
   INVALID_RAISE_TIER: 'INVALID_RAISE_TIER',
@@ -58,7 +59,7 @@ export const ERROR_CODES = Object.freeze({
 const KNOWN_COMMANDS = new Set([
   'hello',
   'create', 'join', 'leave', 'rename', 'startPick', 'pick', 'startGame',
-  'act', 'skill', 'extend', 'backToRoom', 'lobby', 'resume',
+  'act', 'skill', 'extend', 'backToRoom', 'lobby', 'resume', 'rejoinGame',
   'identify', 'updateProfile', 'chat',
 ]);
 
@@ -160,6 +161,7 @@ function validateFields(msg) {
       break;
     }
     case 'join':
+    case 'rejoinGame':
       if (!Number.isSafeInteger(msg.teamId) || msg.teamId < 1) {
         return failure(ERROR_CODES.INVALID_FIELD, 'teamId 必须是正整数');
       }

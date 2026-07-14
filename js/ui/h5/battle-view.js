@@ -44,6 +44,9 @@ const h5HandEffectTier = (category) => (
  * hand threshold; the transient hit notice still requires a hole-card core.
  */
 export const isH5StrongMadeHand = isPlayerMadeStrongHand;
+export const shouldRenderH5PortraitReveal = (playerIdx, myIdx) => (
+  Number(playerIdx) !== Number(myIdx)
+);
 
 export function classifyH5PremiumStartingHand(hole = []) {
   if (!Array.isArray(hole) || hole.length < 2) return null;
@@ -327,7 +330,7 @@ export function classifyH5SeatStatus(player, {
   return { state: 'idle', label: '尚未行动' };
 }
 
-export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
+export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) {
   const engine = battle;
   const listeners = battle.listeners || {};
   const players = engine.players;
@@ -372,6 +375,18 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
   const blindText = element('span', { className: 'h5-battle__blind', text: '血祭 10/20' });
   const networkText = element('span', { className: 'h5-battle__network', text: '● 联网' });
   const logButton = button('战报', { className: 'h5-icon-button', attrs: { 'data-testid': 'h5-open-log' } });
+  const leaveButton = button('离开', {
+    className: 'h5-icon-button h5-battle__leave',
+    attrs: { 'data-testid': 'h5-leave-battle', 'aria-label': '离开当前牌局并启用系统托管' },
+    on: { click: () => onLeave?.() },
+  });
+  const refreshLeaveButton = () => {
+    leaveButton.dataset.playerAlive = me?.alive ? 'true' : 'false';
+    leaveButton.setAttribute(
+      'aria-label',
+      me?.alive ? '离开当前牌局并启用系统托管' : '离开当前牌局',
+    );
+  };
   const advisorToggle = element('input', {
     attrs: {
       type: 'checkbox',
@@ -772,6 +787,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
     element('header', { className: 'h5-battle__topbar' }, [
       element('strong', { text: '群英决' }), roundText, blindText,
       element('span', { className: 'h5-battle__spacer' }), advisorToggleLabel, networkText, logButton,
+      leaveButton,
     ]),
     table,
     dock,
@@ -1210,7 +1226,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
   }
 
   function settlementHost(idx) {
-    return Number(idx) === Number(myIdx) ? mePanel : seatMap.get(Number(idx))?.root;
+    return Number(idx) === Number(myIdx) ? myStatus : seatMap.get(Number(idx))?.action;
   }
 
   function settlementPortrait(idx) {
@@ -1218,11 +1234,26 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
   }
 
   function settlementRevealHost(idx) {
-    return Number(idx) === Number(myIdx) ? table : seatMap.get(Number(idx))?.root;
+    if (!shouldRenderH5PortraitReveal(idx, myIdx)) return null;
+    return seatMap.get(Number(idx))?.portrait;
+  }
+
+  function syncSeatRevealChrome(idx) {
+    const seat = seatMap.get(Number(idx))?.root;
+    if (!seat) return;
+    const isRevealing = Boolean(
+      seat.querySelector('.h5-public-hole-reveal, .h5-settlement-reveal'),
+    );
+    seat.classList.toggle('is-revealing-hole', isRevealing);
+  }
+
+  function syncAllSeatRevealChrome() {
+    seatMap.forEach((_nodes, idx) => syncSeatRevealChrome(idx));
   }
 
   function clearPublicHoleFeedback() {
     screen.querySelectorAll('[data-h5-public-hole]').forEach((node) => node.remove());
+    syncAllSeatRevealChrome();
   }
 
   function showPublicHoleCards(idx, hole, label = '公开底牌') {
@@ -1235,18 +1266,18 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
       });
       return;
     }
-    const host = seatMap.get(seat)?.root;
+    const host = seatMap.get(seat)?.portrait;
     if (!host) return;
     host.querySelector(`[data-h5-public-hole][data-player-idx="${seat}"]`)?.remove();
     const cardNodes = cards.map((cardValue) => {
-      const card = makeCard('h5-card--public-hole');
+      const card = makeCard('h5-card--public-hole h5-card--seat-reveal');
       card.root.setAttribute('data-testid', 'h5-public-hole-card');
       if (cardValue) card.setCard(cardValue);
       else card.faceDown('未公开');
       return card.root;
     });
     host.appendChild(element('span', {
-      className: 'h5-public-hole-reveal',
+      className: 'h5-seat-hole-reveal h5-public-hole-reveal',
       attrs: {
         'data-testid': 'h5-public-hole-reveal',
         'data-player-idx': seat,
@@ -1255,13 +1286,15 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
       },
     }, [
       element('span', { className: 'h5-public-hole-reveal__cards' }, cardNodes),
-      element('small', { text: label }),
+      element('small', { className: 'h5-seat-hole-reveal__label', text: label }),
     ]));
+    syncSeatRevealChrome(seat);
   }
 
   function clearSettlementFeedback() {
     screen.querySelectorAll('[data-h5-settlement]').forEach((node) => node.remove());
     chipFlightLayer.replaceChildren();
+    syncAllSeatRevealChrome();
   }
 
   function settlementRows(wonAmount = {}, netResult = {}) {
@@ -1396,34 +1429,36 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
       for (const entrant of entrants) {
         const idx = Number(entrant.idx);
         const player = players[idx] || entrant;
-        const host = settlementRevealHost(idx);
-        if (!host) continue;
         const handNameValue = entrant.showdownInfo?.name || '牌型待同步';
         const pokerType = Config.HAND_NAMES[entrant.showdownInfo?.cat]?.poker || '';
         const handType = pokerType ? `${handNameValue} · ${pokerType}` : handNameValue;
-        const cards = Array.from({ length: 2 }, (_, cardIndex) => {
-          const card = makeCard('h5-card--settlement');
-          card.root.setAttribute('data-testid', 'h5-settlement-card');
-          if (entrant.hole?.[cardIndex]) card.setCard(entrant.hole[cardIndex]);
-          else card.faceDown('未同步');
-          return card.root;
-        });
-        host.appendChild(element('span', {
-          className: `h5-settlement-reveal${idx === Number(myIdx) ? ' is-self' : ''}`,
-          attrs: {
-            'data-testid': 'h5-settlement-reveal',
-            'data-player-idx': idx,
-            'data-h5-settlement': true,
-            'aria-label': `${player.playerName || player.hero?.name || '玩家'}，${handType}`,
-          },
-        }, [
-          element('span', { className: 'h5-settlement-reveal__cards' }, cards),
-          element('strong', {
-            className: 'h5-settlement-reveal__hand',
-            text: handType,
-            attrs: { 'data-testid': 'h5-settlement-hand-type', title: handType },
-          }),
-        ]));
+        const host = settlementRevealHost(idx);
+        if (host) {
+          const cards = Array.from({ length: 2 }, (_, cardIndex) => {
+            const card = makeCard('h5-card--settlement h5-card--seat-reveal');
+            card.root.setAttribute('data-testid', 'h5-settlement-card');
+            if (entrant.hole?.[cardIndex]) card.setCard(entrant.hole[cardIndex]);
+            else card.faceDown('未同步');
+            return card.root;
+          });
+          host.appendChild(element('span', {
+            className: 'h5-seat-hole-reveal h5-settlement-reveal',
+            attrs: {
+              'data-testid': 'h5-settlement-reveal',
+              'data-player-idx': idx,
+              'data-h5-settlement': true,
+              'aria-label': `${player.playerName || player.hero?.name || '玩家'}，${handType}`,
+            },
+          }, [
+            element('span', { className: 'h5-settlement-reveal__cards' }, cards),
+            element('strong', {
+              className: 'h5-seat-hole-reveal__label h5-settlement-reveal__hand',
+              text: handType,
+              attrs: { 'data-testid': 'h5-settlement-hand-type', title: handType },
+            }),
+          ]));
+          syncSeatRevealChrome(idx);
+        }
         const row = rows.find((item) => item.idx === idx);
         const netText = row ? (row.net > 0 ? `净赢 +${row.net}` : row.net < 0 ? `净负 ${row.net}` : '净收益 0') : '净收益 0';
         addLog(`${player.playerName || player.hero?.name || '玩家'} · ${handType} · ${netText}`, row?.tone === 'win' ? 'win' : 'result');
@@ -1748,6 +1783,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
     }
     for (let idx = 1; idx <= playerCount; idx++) setHp(idx);
     myPlayerName.textContent = me.playerName || '你';
+    refreshLeaveButton();
     for (const [idx, nodes] of seatMap) {
       const player = players[idx];
       if (!player) continue;
@@ -2181,6 +2217,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver }) {
   bindListener('onDeath', (idx) => {
     if (Number(activeStatusTurn()) === Number(idx)) turnIdx = null;
     clearObservedTurnClock(idx);
+    if (Number(idx) === Number(myIdx)) refreshLeaveButton();
     renderAllSeatStatuses();
     refreshHandStrength();
     addLog(`${players[idx].hero.name} 阵亡`, 'result');

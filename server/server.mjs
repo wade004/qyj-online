@@ -406,9 +406,37 @@ export function startServer(port = 8790, {
         ...tableRules(t),
       }))
       .sort((a, b) => a.id - b.id);
+    const activeGames = [...teams.values()]
+      .filter((team) => team.phase === 'playing' && team.game)
+      .flatMap((team) => {
+        const game = team.game;
+        for (const seat of game.detachedSeats || []) {
+          const member = game.seatToClient.get(seat);
+          if (member?.playerId !== client.playerId) continue;
+          const player = game.engine.players[seat];
+          return [{
+            id: team.id,
+            name: team.name,
+            tableSize: game.tableSize,
+            round: game.engine.round,
+            seat,
+            alive: Boolean(player?.alive),
+            heroId: player?.hero?.id || null,
+            heroName: player?.hero?.name || null,
+            hp: Math.max(0, Number(player?.hp) || 0),
+          }];
+        }
+        return [];
+      })
+      .sort((a, b) => a.id - b.id);
     send(client, {
       ev: 'lobby',
-      a: { teams: list, yourName: client.name, player: client.playerProfile || null },
+      a: {
+        teams: list,
+        activeGames,
+        yourName: client.name,
+        player: client.playerProfile || null,
+      },
     });
   }
   function broadcastLobby() {
@@ -741,9 +769,10 @@ export function startServer(port = 8790, {
     const game = team?.game;
     const e = game?.engine;
     if (!game || !e || game.recordedRounds?.has(e.round)) return;
-    const participantSeats = game.handSeats?.size
-      ? [...game.handSeats]
-      : e.players.slice(1).filter((player) => player.hole?.length === 2).map((player) => player.idx);
+    const participantSeatSet = game.handSeats?.size
+      ? new Set(game.handSeats)
+      : new Set(e.players.slice(1).filter((player) => player.hole?.length === 2).map((player) => player.idx));
+    const participantSeats = Array.from({ length: game.tableSize }, (_, index) => index + 1);
     const players = participantSeats.map((seat) => {
       const player = e.players[seat];
       const member = game.seatToClient.get(seat);
@@ -753,7 +782,9 @@ export function startServer(port = 8790, {
         playerId: member?.playerId || null,
         playerName: player.playerName || player.hero.name,
         heroId: player.hero.id,
-        hole: player.hole.map(cardJ),
+        hole: participantSeatSet.has(seat) && player.hole?.length === 2
+          ? player.hole.map(cardJ)
+          : [null, null],
         publicHole,
         folded: player.folded,
         allIn: player.allIn,
@@ -826,7 +857,20 @@ export function startServer(port = 8790, {
       game.lastOpts = opts;
       game.awaitTotal = Config.ACTION_TIME;
       const m = game.seatToClient.get(idx);
-      if (m?.connected && clients.get(m.id) === m) {
+      if (game.detachedSeats?.has(idx)) {
+        game.awaitLeft = 0;
+        if (game.actionClock?.idx === idx) {
+          game.actionClock.remaining = 0;
+          game.actionClock.total = Config.ACTION_TIME;
+        }
+        publishActionClock(team);
+        queueMicrotask(() => {
+          if (team.game === game && game.detachedSeats?.has(idx)
+            && game.awaitSeat === idx && e.waitingIdx === idx) {
+            autoAct(game);
+          }
+        });
+      } else if (m?.connected && clients.get(m.id) === m) {
         game.awaitLeft = Config.ACTION_TIME;
         if (game.actionClock?.idx === idx) {
           game.actionClock.remaining = game.awaitLeft;
@@ -986,6 +1030,7 @@ export function startServer(port = 8790, {
       team.phase = 'lobby';
       team.picks = {};
       team.game = null;
+      if (team.members.length === 0) teams.delete(team.id);
       const affectedTeamIds = new Set([team.id]);
       for (const profile of storedProfiles) {
         for (const teamId of applyPlayerProfile(profile, { notify: true })) {
@@ -1056,6 +1101,8 @@ export function startServer(port = 8790, {
       awaitSeat: null, awaitLeft: 0, awaitTotal: 0, lastOpts: null, allInReveal: null,
       lastShowdown: null, publicHoleBySeat: new Map(), publicRevealEvents: [],
       handSeats: new Set(), recordedRounds: new Set(),
+      detachedSeats: new Set(),
+      ownerPlayerId: clients.get(team.ownerId)?.playerId || null,
       actionClockSeq: 0, actionClock: null,
     };
     team.phase = 'playing';
@@ -1128,6 +1175,76 @@ export function startServer(port = 8790, {
     game.awaitSeat = null;
     const opts = game.lastOpts || e.getOptions(e.players[seat]);
     e.playerAct(opts.canCheck ? { type: 'check' } : { type: 'fold' });
+  }
+
+  function findDetachedGame(playerId, teamId) {
+    if (!playerId) return null;
+    const team = teams.get(Number(teamId));
+    const game = team?.phase === 'playing' ? team.game : null;
+    if (!game) return null;
+    for (const seat of game.detachedSeats || []) {
+      const member = game.seatToClient.get(seat);
+      if (member?.playerId === playerId) return { team, game, seat, member };
+    }
+    return null;
+  }
+
+  function detachPlayingClient(team, client) {
+    const game = team?.game;
+    const seat = Number(client.seat);
+    if (!game || !Number.isInteger(seat) || game.seatToClient.get(seat) !== client) return false;
+    const detachedMember = {
+      id: `detached:${team.id}:${seat}:${client.playerId || client.id}`,
+      name: client.name,
+      playerId: client.playerId,
+      playerProfile: client.playerProfile,
+      seat,
+      teamId: team.id,
+      connected: false,
+      isAlive: false,
+      detached: true,
+      pendingResult: null,
+    };
+    game.seatToClient.set(seat, detachedMember);
+    game.detachedSeats.add(seat);
+    detachRoomMember(team, client.id);
+    client.teamId = null;
+    client.seat = null;
+    client.pendingResult = null;
+
+    if (game.awaitSeat === seat && game.engine.waitingIdx === seat) {
+      game.awaitLeft = 0;
+      if (game.actionClock?.idx === seat) game.actionClock.remaining = 0;
+      publishActionClock(team);
+      queueMicrotask(() => {
+        if (team.game === game && game.detachedSeats.has(seat)
+          && game.awaitSeat === seat && game.engine.waitingIdx === seat) {
+          autoAct(game);
+        }
+      });
+    }
+    sendTeamState(team);
+    broadcastLobby();
+    sendLobbyTo(client);
+    return true;
+  }
+
+  function rejoinDetachedGame(client, teamId) {
+    const found = findDetachedGame(client.playerId, teamId);
+    if (!found) return false;
+    const { team, game, seat } = found;
+    if (!clientSupportsTableSize(client, game.tableSize)) return false;
+    game.seatToClient.set(seat, client);
+    game.detachedSeats.delete(seat);
+    if (!team.members.includes(client.id)) team.members.push(client.id);
+    client.teamId = team.id;
+    client.seat = seat;
+    client.pendingResult = null;
+    if (!team.ownerId || game.ownerPlayerId === client.playerId) team.ownerId = client.id;
+    sendResumeState(client);
+    sendTeamState(team);
+    broadcastLobby();
+    return true;
   }
 
   // ---------------- 队伍操作 ----------------
@@ -1261,10 +1378,21 @@ export function startServer(port = 8790, {
     } else if (cmd === 'leave') {
       const team = client.teamId ? teams.get(client.teamId) : null;
       if (team?.phase === 'playing') {
-        return fail(client, ERROR_CODES.INVALID_ROOM_PHASE, '对局中不能直接离开房间');
+        if (!detachPlayingClient(team, client)) {
+          return fail(client, ERROR_CODES.GAME_NOT_FOUND, '当前没有可离开的对局');
+        }
+        return;
       }
       removeFromTeam(client);
       sendLobbyTo(client);
+
+    } else if (cmd === 'rejoinGame') {
+      if (client.teamId) return fail(client, ERROR_CODES.ALREADY_IN_ROOM, '请先离开当前房间');
+      if (!rejoinDetachedGame(client, msg.teamId)) {
+        fail(client, ERROR_CODES.GAME_NOT_REJOINABLE, '该牌局已结束或不属于当前账号');
+        sendLobbyTo(client);
+        return;
+      }
 
     } else if (cmd === 'rename') {
       const name = normalizeNickname(msg.name);

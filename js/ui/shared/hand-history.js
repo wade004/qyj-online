@@ -1,4 +1,5 @@
 import { RANK_NAMES, SUITS } from '../../game/config.js';
+import { evalBest } from '../../game/handeval.js';
 import { getHero } from '../../game/heroes.js';
 import { button, element } from './dom.js';
 
@@ -19,10 +20,59 @@ function netMeta(value) {
   };
 }
 
-function cardNode(card, testId) {
+export function handRecordNumber(value) {
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0
+    ? `#${String(id).padStart(6, '0')}`
+    : '#------';
+}
+
+function normalizedCard(card) {
+  if (!card) return null;
+  return {
+    rank: Number(card.r ?? card.rank),
+    suit: Number(card.s ?? card.suit),
+  };
+}
+
+const cardKey = (card) => {
+  const normalized = normalizedCard(card);
+  return normalized ? `${normalized.rank}:${normalized.suit}` : '';
+};
+
+export function bestFiveCardKeys(participant, board = []) {
+  const hole = Array.isArray(participant?.hole) ? participant.hole : [];
+  const community = Array.isArray(board) ? board.filter(Boolean) : [];
+  if (!participant?.handName || hole.length !== 2 || hole.some((card) => !card)
+    || community.length !== 5) return new Set();
+  const cards = [...hole, ...community].map(normalizedCard);
+  return new Set(evalBest(cards).best5.map(cardKey));
+}
+
+export function historyPlayersBySeat(record = {}) {
+  const playersBySeat = new Map((record.players || []).map((participant) => [
+    Number(participant.seat), participant,
+  ]));
+  return Array.from({ length: Number(record.tableSize) || 0 }, (_, index) => (
+    playersBySeat.get(index + 1) || {
+      seat: index + 1,
+      playerName: '本局未参与',
+      heroId: '',
+      isYou: false,
+      hole: [null, null],
+      participated: false,
+      folded: false,
+      allIn: false,
+      netResult: 0,
+      handName: null,
+    }
+  ));
+}
+
+function cardNode(card, testId, { source = '', best = false } = {}) {
   if (!card) {
     return element('span', {
-      className: 'hand-history__card is-hidden',
+      className: `hand-history__card is-hidden${source ? ` is-${source}` : ''}`,
       text: '暗',
       attrs: { 'data-testid': testId, 'aria-label': '未公开底牌' },
     });
@@ -32,17 +82,24 @@ function cardNode(card, testId) {
   const suitInfo = SUITS[suit];
   const label = `${RANK_NAMES[rank] || rank}${suitInfo?.char || '?'}`;
   return element('span', {
-    className: `hand-history__card${suitInfo?.red ? ' is-red' : ''}`,
+    className: `hand-history__card${suitInfo?.red ? ' is-red' : ''}${source ? ` is-${source}` : ''}${best ? ' is-best-five' : ''}`,
     text: label,
-    attrs: { 'data-testid': testId, 'aria-label': label },
+    attrs: {
+      'data-testid': testId,
+      'data-card-source': source || undefined,
+      'data-best-five': best ? 'true' : 'false',
+      'aria-label': `${label}${best ? '，最终成牌' : ''}`,
+    },
   });
 }
 
-function participantRow(participant, prefix) {
+function participantRow(participant, board, prefix) {
   const net = netMeta(participant.netResult);
   const hero = getHero(participant.heroId);
   const visible = Number(participant.visibleCardCount) || participant.hole?.filter(Boolean).length || 0;
-  const state = participant.folded
+  const state = participant.participated === false
+    ? '本局未参与'
+    : participant.folded
     ? '已弃牌'
     : participant.handName
       ? participant.handName
@@ -51,13 +108,28 @@ function participantRow(participant, prefix) {
         : visible === 2
           ? '已亮牌'
           : '未公开';
+  const bestFive = bestFiveCardKeys(participant, board);
+  const combinedCards = [
+    ...(participant.hole || [null, null]).map((card) => cardNode(
+      card,
+      `${prefix}-hole-card`,
+      { source: 'hole', best: bestFive.has(cardKey(card)) },
+    )),
+    ...Array.from({ length: 5 }, (_, index) => {
+      const card = board?.[index];
+      return cardNode(card, `${prefix}-player-board-card`, {
+        source: 'board', best: bestFive.has(cardKey(card)),
+      });
+    }),
+  ];
   return element('li', {
-    className: `hand-history__player${participant.isYou ? ' is-self' : ''}`,
+    className: `hand-history__player${participant.isYou ? ' is-self' : ''}${participant.participated === false ? ' is-absent' : ''}`,
     attrs: {
       'data-testid': `${prefix}-player`,
       'data-player-seat': String(participant.seat),
       'data-is-you': participant.isYou ? 'true' : 'false',
       'data-folded': participant.folded ? 'true' : 'false',
+      'data-participated': participant.participated === false ? 'false' : 'true',
       'data-visible-cards': String(visible),
     },
   }, [
@@ -66,10 +138,7 @@ function participantRow(participant, prefix) {
       element('strong', { text: participant.playerName || hero?.name || '玩家' }),
       element('small', { text: hero?.name || participant.heroId || '未知英雄' }),
     ]),
-    element('span', { className: 'hand-history__cards' }, [
-      cardNode(participant.hole?.[0], `${prefix}-hole-card`),
-      cardNode(participant.hole?.[1], `${prefix}-hole-card`),
-    ]),
+    element('span', { className: 'hand-history__cards hand-history__cards--combined' }, combinedCards),
     element('span', { className: 'hand-history__state', text: state }),
     element('strong', { className: `hand-history__net is-${net.tone}`, text: net.text }),
   ]);
@@ -81,16 +150,24 @@ function historyItem(record, prefix) {
   const summary = element('summary', { className: 'hand-history__summary' }, [
     element('span', {}, [
       element('strong', { text: `${record.roomName || '联机房间'} · 第${record.round}局` }),
-      element('small', { text: `房间 #${record.roomId} · ${record.tableSize}人桌 · ${safeDate(record.playedAt)}` }),
+      element('small', {
+        text: `唯一局号 ${handRecordNumber(record.id)} · 房间 #${record.roomId} · ${record.tableSize}人桌 · ${safeDate(record.playedAt)}`,
+      }),
     ]),
     element('span', { className: `hand-history__result is-${net.tone}` }, [
       element('small', { text: resolution }),
       element('strong', { text: net.text }),
     ]),
   ]);
-  const boardCards = Array.from({ length: 5 }, (_, index) => (
-    cardNode(record.board?.[index], `${prefix}-board-card`)
-  ));
+  const self = record.players?.find((participant) => participant.isYou);
+  const selfBestFive = bestFiveCardKeys(self, record.board);
+  const boardCards = Array.from({ length: 5 }, (_, index) => {
+    const card = record.board?.[index];
+    return cardNode(card, `${prefix}-board-card`, {
+      source: 'board', best: selfBestFive.has(cardKey(card)),
+    });
+  });
+  const players = historyPlayersBySeat(record);
   return element('details', {
     className: 'hand-history__item',
     attrs: {
@@ -107,11 +184,11 @@ function historyItem(record, prefix) {
         element('small', { text: `庄位 ${record.dealerSeat} · ${resolution}` }),
       ]),
       element('ol', { className: 'hand-history__players' }, (
-        record.players || []).map((participant) => participantRow(participant, prefix))
-      ),
+        players.map((participant) => participantRow(participant, record.board, prefix))
+      )),
       element('p', {
         className: 'hand-history__privacy',
-        text: '自己的底牌始终可见；弃牌对手保持隐藏，只有实际亮牌的牌才会公开。',
+        text: '每位玩家底牌后均展示本局公牌；完整亮牌时高亮最终五张成牌，弃牌对手的暗牌不会被推断或公开。',
       }),
     ]),
   ]);

@@ -440,11 +440,14 @@ export function runMatch({
   blueprintCheckpoint = null,
   residualPolicyModel = null,
   residualInterventionSelector = null,
+  strategyModels = null,
   onExactInfosetProfile = null,
   onResidualPolicyProfile = null,
   onResidualSuccessor = null,
   onDecisionTrace = null,
   forcedDecision = null,
+  forcedDecisionSequence = null,
+  forcedHandStyle = null,
   profileStrategies = null,
   profileMaxRaises = 3,
   profileSourceGroupSecret = null,
@@ -461,6 +464,16 @@ export function runMatch({
   if (!assignment || assignment.seats?.length !== tableSize) {
     throw new RangeError('assignment must contain exactly tableSize seats');
   }
+  if (strategyModels != null && !(strategyModels instanceof Map)
+    && (typeof strategyModels !== 'object' || Array.isArray(strategyModels))) {
+    throw new TypeError('strategyModels must be a Map, plain object or null');
+  }
+  const strategyModelFor = (entry) => {
+    if (strategyModels instanceof Map) {
+      return strategyModels.get(entry.id) ?? strategyModels.get(entry.strategy) ?? null;
+    }
+    return strategyModels?.[entry.id] ?? strategyModels?.[entry.strategy] ?? null;
+  };
   assertInteger(maxSteps, 'maxSteps', 1);
   if (onExactInfosetProfile != null && typeof onExactInfosetProfile !== 'function') {
     throw new TypeError('onExactInfosetProfile must be a function or null');
@@ -479,7 +492,24 @@ export function runMatch({
     || Number(forcedDecision.ordinal) < 1 || !forcedDecision.actionKey)) {
     throw new TypeError('forcedDecision requires entryId, positive ordinal and actionKey');
   }
-  if ((onDecisionTrace || forcedDecision) && skillsEnabled) {
+  if (forcedDecisionSequence != null && (!forcedDecisionSequence.entryId
+    || !Number.isSafeInteger(Number(forcedDecisionSequence.ordinal))
+    || Number(forcedDecisionSequence.ordinal) < 1
+    || !forcedDecisionSequence.firstActionKey
+    || !forcedDecisionSequence.continuationActionKey)) {
+    throw new TypeError('forcedDecisionSequence requires entryId, positive ordinal and two actions');
+  }
+  if (forcedHandStyle != null && (!forcedHandStyle.entryId
+    || !Number.isSafeInteger(Number(forcedHandStyle.round))
+    || Number(forcedHandStyle.round) < 1 || !forcedHandStyle.styleKey
+    || !Config.AI_STYLES.some((style) => style.key === forcedHandStyle.styleKey))) {
+    throw new TypeError('forcedHandStyle requires entryId, positive round and known styleKey');
+  }
+  if ([forcedDecision, forcedDecisionSequence, forcedHandStyle].filter(Boolean).length > 1) {
+    throw new RangeError('forced decision, sequence and hand style replays are mutually exclusive');
+  }
+  if ((onDecisionTrace || forcedDecision || forcedDecisionSequence || forcedHandStyle)
+    && skillsEnabled) {
     throw new RangeError('decision replay requires skillsEnabled=false');
   }
   if ((onExactInfosetProfile || onResidualPolicyProfile || onResidualSuccessor) && skillsEnabled) {
@@ -552,6 +582,11 @@ export function runMatch({
   const bySeat = new Map(assignment.seats.map((entry) => [entry.seat, entry]));
   const statsBySeat = new Map(assignment.seats.map((entry) => [entry.seat, freshActions()]));
   const decisionOrdinals = new Map(assignment.seats.map((entry) => [entry.id, 0]));
+  const forcedSequenceState = forcedDecisionSequence ? {
+    started: false,
+    pending: false,
+    round: null,
+  } : null;
   const residualTrajectoriesBySeat = new Map(assignment.seats.map((entry) => [
     entry.seat, new Map(),
   ]));
@@ -645,9 +680,26 @@ export function runMatch({
       const stats = statsBySeat.get(idx);
       stats.decisions++;
 
+      const forcedStyle = forcedHandStyle
+        && String(forcedHandStyle.entryId) === entry.id
+        && Number(forcedHandStyle.round) === Number(engine.round)
+        ? Config.AI_STYLES.find((style) => style.key === forcedHandStyle.styleKey) : null;
+      const withForcedStyle = (callback) => {
+        if (!forcedStyle) return callback();
+        const originalStyle = player.style;
+        player.style = forcedStyle;
+        try {
+          return callback();
+        } finally {
+          player.style = originalStyle;
+        }
+      };
+
       if (skillsEnabled && strategy.supportsSkills && strategy.maybeUseSkill) {
         try {
-          strategy.maybeUseSkill({ engine, player, rng: strategyRngById.get(entry.id) });
+          withForcedStyle(() => strategy.maybeUseSkill({
+            engine, player, rng: strategyRngById.get(entry.id),
+          }));
         } catch (error) {
           handlePolicyError({
             kind: 'skill-error', entryId: entry.id, strategy: entry.strategy,
@@ -663,7 +715,8 @@ export function runMatch({
         && (!profileStrategySet || profileStrategySet.has(entry.strategy));
       let profileHead = null;
       let decisionObservation = null;
-      if (shouldProfile || beliefCalibration || onDecisionTrace || forcedDecision) {
+      if (shouldProfile || beliefCalibration || onDecisionTrace
+        || forcedDecision || forcedDecisionSequence) {
         try {
           decisionObservation = buildObservation(engine, player);
         } catch {
@@ -719,7 +772,7 @@ export function runMatch({
       }
       let proposed;
       try {
-        proposed = strategy.decide({
+        proposed = withForcedStyle(() => strategy.decide({
           engine,
           player,
           options,
@@ -727,7 +780,9 @@ export function runMatch({
           blueprintCheckpoint,
           residualPolicyModel,
           residualInterventionSelector,
-        });
+          strategyModel: strategyModelFor(entry),
+          tournamentEvolutionModel: strategyModelFor(entry),
+        }));
       } catch (error) {
         handlePolicyError({
           kind: 'decision-error', entryId: entry.id, strategy: entry.strategy,
@@ -738,6 +793,7 @@ export function runMatch({
       decisionOrdinals.set(entry.id, ordinal);
       const baselineActionKey = actionToBlueprintKey(proposed);
       let forced = false;
+      let forcedSequenceStep = null;
       if (forcedDecision && String(forcedDecision.entryId) === entry.id
         && Number(forcedDecision.ordinal) === ordinal) {
         const replacement = actionFromBlueprintKey(forcedDecision.actionKey, options);
@@ -746,6 +802,35 @@ export function runMatch({
         }
         proposed = replacement;
         forced = true;
+      }
+      if (forcedSequenceState && String(forcedDecisionSequence.entryId) === entry.id) {
+        let sequenceActionKey = null;
+        if (forcedSequenceState.pending) {
+          forcedSequenceState.pending = false;
+          if (forcedSequenceState.round === engine.round) {
+            sequenceActionKey = forcedDecisionSequence.continuationActionKey;
+            forcedSequenceStep = 'continuation';
+          }
+        } else if (!forcedSequenceState.started
+          && Number(forcedDecisionSequence.ordinal) === ordinal) {
+          forcedSequenceState.started = true;
+          forcedSequenceState.pending = true;
+          forcedSequenceState.round = engine.round;
+          sequenceActionKey = forcedDecisionSequence.firstActionKey;
+          forcedSequenceStep = 'start';
+        }
+        if (sequenceActionKey) {
+          const replacement = actionFromBlueprintKey(sequenceActionKey, options);
+          if (!replacement && forcedSequenceStep === 'start') {
+            throw new RangeError('forced sequence first action is not legal at replay node');
+          }
+          if (replacement) {
+            proposed = replacement;
+            forced = true;
+          } else {
+            forcedSequenceStep = 'continuation-aborted';
+          }
+        }
       }
       if (onDecisionTrace) {
         const policyDiagnostics = getLastDecisionDiagnostics(engine, player);
@@ -782,6 +867,22 @@ export function runMatch({
           informationSetKey,
           baselineActionKey,
           actionKey: actionToBlueprintKey(proposed),
+          behaviorPolicy: typeof proposed?.behaviorPolicy === 'string'
+            ? proposed.behaviorPolicy : null,
+          behaviorProbability: Number.isFinite(Number(proposed?.behaviorProbability))
+            ? Number(proposed.behaviorProbability) : null,
+          behaviorEpsilon: Number.isFinite(Number(proposed?.behaviorEpsilon))
+            ? Number(proposed.behaviorEpsilon) : null,
+          behaviorBaselineActionKey:
+            typeof proposed?.behaviorBaselineActionKey === 'string'
+              ? proposed.behaviorBaselineActionKey : null,
+          behaviorSupportActionKeys: Array.isArray(proposed?.behaviorSupportActionKeys)
+            ? Object.freeze([...proposed.behaviorSupportActionKeys]) : null,
+          policyFeatures: Array.isArray(proposed?.behaviorFeatures)
+            && proposed.behaviorFeatures.length <= 256
+            && proposed.behaviorFeatures.every((value) => Number.isFinite(Number(value)))
+            ? Object.freeze(proposed.behaviorFeatures.map(Number)) : null,
+          behaviorExplored: proposed?.behaviorExplored === true,
           legalActionKeys: Object.freeze(legalActionKeys),
           policyCandidates: Object.freeze(policyCandidates.map(Object.freeze)),
           bestEvActionKey: policyCandidates[0]?.actionKey || null,
@@ -895,6 +996,9 @@ export function runMatch({
                 }) : null,
             }) : null,
           forced,
+          forcedSequenceStep,
+          handStyleForced: Boolean(forcedStyle),
+          forcedHandStyleKey: forcedStyle?.key || null,
           round: engine.round,
           street: engine.street,
         }));

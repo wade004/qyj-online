@@ -259,6 +259,27 @@ export function classifyH5GameOutcome(ranking = [], myIdx = 1) {
   };
 }
 
+export function battleLeaveRequiresConfirmation(battle, mySeat = 1) {
+  const player = battle?.engine?.players?.[Number(mySeat)];
+  // An unknown snapshot stays on the safe path and still asks for confirmation.
+  return player?.alive !== false;
+}
+
+export function requestOnlineBattleLeave({ root, battle, mySeat = 1, onlineSession } = {}) {
+  if (!battleLeaveRequiresConfirmation(battle, mySeat)) {
+    return onlineSession?.leaveBattle?.({ managed: false });
+  }
+  const layer = dialog({
+    title: '离开当前牌局',
+    message: '离开后将返回联机大厅。若你尚未阵亡，系统会在每次轮到你时立即执行默认操作（能静观则静观，否则退避），不会等待倒计时。之后可从大厅重新接管这局牌。',
+    confirmText: '离开并托管',
+    danger: true,
+    onConfirm: () => onlineSession?.leaveBattle?.({ managed: true }),
+  });
+  root?.appendChild(layer);
+  return layer;
+}
+
 export function mountH5App({ root }) {
   let current = 'boot';
   let currentView = null;
@@ -651,6 +672,7 @@ export function mountH5App({ root }) {
 
   function renderOnlineLobby() {
     const teams = onlineState.data?.teams || [];
+    const activeGames = onlineState.data?.activeGames || [];
     const list = element('div', { className: 'h5-team-list', attrs: { 'data-testid': 'h5-team-list' } });
     if (!teams.length) list.appendChild(element('div', { className: 'h5-empty', text: '暂无公开队伍，创建第一支队伍吧。' }));
     for (const team of teams) {
@@ -671,6 +693,33 @@ export function mountH5App({ root }) {
         }),
       ]));
     }
+    const activeGameList = activeGames.length ? element('section', {
+      className: 'h5-active-games', attrs: { 'data-testid': 'h5-active-games' },
+    }, [
+      element('div', { className: 'h5-active-games__head' }, [
+        element('div', {}, [
+          element('h2', { text: '托管中的牌局' }),
+          element('p', { text: '离桌后系统会在轮到你时立即静观或退避，你可以随时重新接管。' }),
+        ]),
+      ]),
+      element('div', { className: 'h5-active-games__list' }, activeGames.map((game) => element('article', {
+        className: 'h5-active-game', attrs: { 'data-testid': `h5-active-game-${game.id}` },
+      }, [
+        element('div', {}, [
+          element('strong', { text: game.name || `房间 ${game.id}` }),
+          element('small', { text: `#${game.id} · ${game.tableSize}人桌 · 第${game.round || 1}局 · ${game.heroName || '原席位'}` }),
+        ]),
+        element('span', {
+          className: game.alive ? 'is-alive' : 'is-dead',
+          text: game.alive ? `托管中 · 气血 ${game.hp}` : '已阵亡 · 可观战',
+        }),
+        button('继续牌局', {
+          className: 'h5-small-button',
+          attrs: { 'data-testid': `h5-rejoin-game-${game.id}` },
+          on: { click: () => onlineSession.rejoinGame(game.id) },
+        }),
+      ]))),
+    ]) : null;
     clear(root, element('div', { className: 'h5-screen h5-lobby', attrs: { 'data-testid': 'h5-online-lobby' } }, [
       header({
         title: '联机大厅',
@@ -680,6 +729,7 @@ export function mountH5App({ root }) {
         statusTestId: 'h5-player-sync',
       }),
       element('main', { className: 'h5-lobby__body' }, [
+        activeGameList,
         element('div', { className: 'h5-lobby__head' }, [
           element('div', {}, [element('h1', { text: '公开队伍' }), element('p', { text: '6 / 9 人桌 · 1 人即可开局 · AI 自动补位' })]),
           element('div', {}, [
@@ -889,6 +939,15 @@ export function mountH5App({ root }) {
       battle: onlineState.battle,
       myIdx: onlineState.data?.mySeat || 1,
       onGameOver: (ranking) => showResult(ranking, onlineState.data?.mySeat || 1),
+      onLeave: () => {
+        const mySeat = onlineState.data?.mySeat || 1;
+        requestOnlineBattleLeave({
+          root,
+          battle: onlineState.battle,
+          mySeat,
+          onlineSession,
+        });
+      },
     });
   }
 
