@@ -5,9 +5,27 @@
 // ============================================================================
 
 import * as Config from '../game/config.js';
-import { getHero, HEROES, checkCondition } from '../game/heroes.js';
+import { getHero, HEROES } from '../game/heroes.js';
+import { getSkillAvailability, getSkillInput } from '../game/skills.js';
 
 const card = (c) => ({ rank: c.r, suit: c.s });
+const ATTACK_KEYS = new Set(Config.ATTACK_TIERS.map((tier) => tier.key));
+
+function normalizeActionClock(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const idx = Number(raw.idx);
+  const remainingMs = Number(raw.remainingMs);
+  const totalMs = Number(raw.totalMs);
+  if (!Number.isInteger(idx) || idx < 1 || !Number.isFinite(remainingMs)) return null;
+  return {
+    turnId: raw.turnId ?? null,
+    idx,
+    remainingMs: Math.max(0, remainingMs),
+    totalMs: Math.max(1000, Number.isFinite(totalMs) ? totalMs : Config.ACTION_TIME * 1000),
+    serverNow: Number(raw.serverNow) || null,
+    deadlineAt: Number(raw.deadlineAt) || null,
+  };
+}
 
 export class RemoteEngine {
   /**
@@ -18,7 +36,24 @@ export class RemoteEngine {
   constructor(startData, listeners, sendFn) {
     this.listeners = listeners;
     this.send = sendFn;
-    this.myIdx = startData.mySeat;
+    const inferredSize = Array.isArray(startData?.players) ? startData.players.length : 0;
+    const requestedTableSize = Number(startData?.tableSize ?? inferredSize ?? Config.DEFAULT_TABLE_SIZE);
+    if (!Config.SUPPORTED_TABLE_SIZES.includes(requestedTableSize)) {
+      throw new RangeError(`Unsupported remote table size: ${requestedTableSize}`);
+    }
+    if (!Array.isArray(startData.players) || startData.players.length !== requestedTableSize) {
+      throw new RangeError(`Remote gameStart must contain ${requestedTableSize} players`);
+    }
+    const seats = new Set(startData.players.map((player) => Number(player.seat)));
+    if (seats.size !== requestedTableSize
+      || [...seats].some((seat) => !Number.isInteger(seat) || seat < 1 || seat > requestedTableSize)) {
+      throw new RangeError('Remote gameStart seats must uniquely cover the selected table');
+    }
+    this.tableSize = requestedTableSize;
+    this.myIdx = Number(startData.mySeat);
+    if (!Number.isInteger(this.myIdx) || this.myIdx < 1 || this.myIdx > this.tableSize) {
+      throw new RangeError('Remote gameStart mySeat is outside the selected table');
+    }
     this.players = [null];
     for (const p of startData.players) {
       this.players[p.seat] = {
@@ -26,6 +61,12 @@ export class RemoteEngine {
         hero: getHero(p.heroId) || HEROES[0],
         playerName: p.name,
         isHuman: p.isHuman,
+        playerId: p.playerId || null,
+        shortId: p.shortId || null,
+        emblem: p.emblem || '侠',
+        pokerStats: p.pokerStats && typeof p.pokerStats === 'object'
+          ? { ...p.pokerStats }
+          : null,
         hp: Config.INIT_HP,
         energy: Config.INIT_ENERGY,
         alive: true,
@@ -34,48 +75,106 @@ export class RemoteEngine {
         allIn: false,
         betStreet: 0,
         betRound: 0,
+        acted: false,
+        lastAction: null,
         skillUsed: false,
+        skillStatuses: [],
+        passiveUsed: Object.create(null),
+        skillData: { flags: Object.create(null), copiedPassiveIds: [], revealedCard: null, raisedThisRound: false },
         showdownInfo: null,
       };
     }
     this.board = [];
     this.revealed = 0;
     this.round = 0;
+    this.street = 'idle';
+    this.dealerIdx = 0;
+    this.currentBet = 0;
+    this.streetRaiseCount = 0;
+    this.actingIdx = 0;
+    this.lastAggressiveWager = null;
     this.pot = 0;
+    this.potLayers = [{ label: '主池', amount: 0, kind: 'main' }];
+    this.potDisplay = [{ label: '当前血池', amount: 0, kind: 'main' }];
     this.waitingIdx = null;
+    this.actionClock = null;
     this.gameOver = false;
+    this.lastRanking = null;
     this.time = 0;
     this.queue = [];
+  }
+
+  applyRoster(roster = []) {
+    if (!Array.isArray(roster)) return false;
+    let applied = false;
+    for (const raw of roster) {
+      const seat = Number(raw?.seat);
+      const player = this.players[seat];
+      if (!player) continue;
+      if (raw.heroId) player.hero = getHero(raw.heroId) || player.hero;
+      if (typeof raw.name === 'string' && raw.name.trim()) {
+        player.playerName = raw.name.trim();
+      }
+      if (Object.hasOwn(raw, 'isHuman')) player.isHuman = Boolean(raw.isHuman);
+      if (Object.hasOwn(raw, 'playerId')) player.playerId = raw.playerId || null;
+      if (Object.hasOwn(raw, 'shortId')) player.shortId = raw.shortId || null;
+      if (Object.hasOwn(raw, 'emblem')) player.emblem = raw.emblem || '侠';
+      if (Object.hasOwn(raw, 'pokerStats')) {
+        player.pokerStats = raw.pokerStats && typeof raw.pokerStats === 'object'
+          ? { ...raw.pokerStats }
+          : null;
+      }
+      applied = true;
+    }
+    return applied;
   }
 
   // ---- 与本地 Engine 对齐的查询接口 ----
 
   totalPot() { return this.pot; }
+  getPotBreakdown() { return this.potLayers; }
+  getPotDisplay(includeReference = true) {
+    return includeReference
+      ? this.potDisplay
+      : this.potDisplay.filter((item) => item.kind !== 'reference');
+  }
   revealedBoard() { return this.board.slice(0, this.revealed); }
   activePlayers() {
     return this.players.slice(1).filter((p) => p.alive && !p.folded);
   }
   canUseSkill(idx) {
-    const p = this.players[idx];
-    if (!p || this.gameOver || !p.alive || p.folded || p.skillUsed) return false;
-    if (this.round <= 0) return false;
-    if (p.energy < p.hero.skillCost) return false;
-    if (p.hole.length < 2) return false;
-    return checkCondition(p.hero.id, p.hole);
+    return getSkillAvailability(this, this.players[idx]).ok;
+  }
+  skillAvailability(idx) {
+    return getSkillAvailability(this, this.players[idx]);
+  }
+  getSkillPrompt(idx) {
+    return getSkillInput(this, this.players[idx]);
   }
 
   // ---- 行动转发 ----
 
   playerAct(act) {
-    this.send({ cmd: 'act', type: act.type, tierKey: act.tier ? act.tier.key : undefined });
+    if (this.waitingIdx !== this.myIdx) return false;
+    return this.send({ cmd: 'act', type: act.type, tierKey: act.tier ? act.tier.key : undefined }) !== false;
   }
-  useSkill(idx, extra = null) {
-    this.send({ cmd: 'skill', cardIdx: extra ? extra.cardIdx : undefined });
+  useSkill(idx, selection = null) {
+    if (Number(idx) !== Number(this.myIdx)
+      || Number(this.actingIdx) !== Number(this.myIdx)
+      || Number(this.waitingIdx) !== Number(this.myIdx)
+      || !this.canUseSkill(idx)) return false;
+    this.send({ cmd: 'skill', selection: selection || undefined });
     return true;
   }
   extendTime() {
     this.send({ cmd: 'extend' });
     return false; // 剩余时间由服务器重播 await 刷新
+  }
+
+  sendChat(text) {
+    const value = String(text || '').trim();
+    if (!value || [...value].length > 80) return false;
+    return this.send({ cmd: 'chat', text: value }) !== false;
   }
 
   // ---- 延时队列（演出用） ----
@@ -93,28 +192,158 @@ export class RemoteEngine {
 
   applySnapshot(s) {
     if (!s) return;
+    if (s.tableSize != null && Number(s.tableSize) !== this.tableSize) {
+      throw new RangeError('Remote snapshot tableSize does not match gameStart');
+    }
+    const previousStreet = this.street;
     this.round = s.round ?? this.round;
+    this.street = s.street ?? this.street;
+    this.dealerIdx = s.dealerIdx ?? this.dealerIdx;
+    this.streetRaiseCount = s.streetRaiseCount ?? this.streetRaiseCount;
+    if (Object.prototype.hasOwnProperty.call(s, 'actingIdx')) {
+      this.actingIdx = Number.isInteger(s.actingIdx) ? s.actingIdx : 0;
+    } else if (s.waitingIdx != null) {
+      // Legacy snapshots only exposed the human seat waiting for input.
+      this.actingIdx = s.waitingIdx;
+    }
     this.pot = s.pot ?? this.pot;
+    if (s.potLayers) this.potLayers = s.potLayers.map((layer) => ({ ...layer }));
+    if (s.potDisplay) {
+      this.potDisplay = s.potDisplay.map((item) => ({ ...item }));
+      if (!s.potLayers) {
+        this.potLayers = this.potDisplay
+          .filter((item) => item.kind !== 'reference')
+          .map((item) => ({ ...item }));
+      }
+    }
     this.waitingIdx = s.waitingIdx ?? null;
+    if (Object.prototype.hasOwnProperty.call(s, 'actionClock')) {
+      this.actionClock = normalizeActionClock(s.actionClock);
+    }
     this.revealed = s.revealed ?? this.revealed;
     if (s.board) this.board = s.board.map(card);
     if (s.players) {
       for (const sp of s.players) {
         const p = this.players[sp.seat];
-        if (!p) continue;
+        if (!p) throw new RangeError(`Remote snapshot contains unknown seat ${sp.seat}`);
         p.hp = sp.hp; p.energy = sp.energy; p.alive = sp.alive;
         p.folded = sp.folded; p.allIn = sp.allIn;
         p.betStreet = sp.betStreet; p.betRound = sp.betRound;
+        if (Object.prototype.hasOwnProperty.call(sp, 'acted')) p.acted = !!sp.acted;
+        if (Object.prototype.hasOwnProperty.call(sp, 'lastAction')) {
+          p.lastAction = sp.lastAction && typeof sp.lastAction === 'object'
+            ? { ...sp.lastAction }
+            : null;
+        }
         p.skillUsed = sp.skillUsed;
+        p.skillStatuses = (sp.skillModifiers || []).map((status) => ({ ...status }));
       }
+    }
+    this.currentBet = s.currentBet ?? Math.max(
+      0,
+      ...this.players.slice(1).map((player) => player?.betStreet || 0),
+    );
+    const reference = this.potDisplay.find((item) => item.kind === 'reference');
+    if (Object.prototype.hasOwnProperty.call(s, 'lastAggressiveWager')) {
+      this.lastAggressiveWager = s.lastAggressiveWager ? { ...s.lastAggressiveWager } : null;
+    } else if (reference) {
+      this.lastAggressiveWager = {
+        actorIdx: reference.actorIdx || null,
+        amount: reference.wagerAmount || 0,
+        potBefore: reference.amount || 0,
+        ratio: reference.ratio || 0,
+      };
+    } else if (previousStreet !== this.street) {
+      this.lastAggressiveWager = null;
+      if (s.streetRaiseCount == null) this.streetRaiseCount = 0;
     }
   }
 
   onMessage(msg) {
+    const previousCurrentBet = this.currentBet;
     this.applySnapshot(msg.s);
     const a = msg.a || {};
     const ev = msg.ev;
     const L = this.listeners;
+    const snapshotHasPlayerActions = Array.isArray(msg.s?.players)
+      && msg.s.players.some((player) => Object.prototype.hasOwnProperty.call(player, 'acted')
+        || Object.prototype.hasOwnProperty.call(player, 'lastAction'));
+
+    if (ev === 'onRoundStart') {
+      this.actingIdx = 0;
+      this.actionClock = null;
+      for (const player of this.players.slice(1)) {
+        player.hole = [];
+        player.showdownInfo = null;
+      }
+      if (!snapshotHasPlayerActions) {
+        for (const player of this.players.slice(1)) {
+          player.acted = false;
+          player.lastAction = null;
+        }
+      }
+    } else if (ev === 'onBlindsPosted' && !snapshotHasPlayerActions) {
+      const sb = this.players[a.sbIdx];
+      const bb = this.players[a.bbIdx];
+      if (sb) sb.lastAction = {
+        key: 'smallBlind', amount: Number(a.sbAmt) || 0,
+        street: this.street, round: this.round,
+      };
+      if (bb) bb.lastAction = {
+        key: 'bigBlind', amount: Number(a.bbAmt) || 0,
+        street: this.street, round: this.round,
+      };
+    } else if (ev === 'onTurnStart' || ev === 'onAwaitAction') {
+      this.actingIdx = Number.isInteger(a.idx) ? a.idx : 0;
+      if (a.clock) this.actionClock = normalizeActionClock(a.clock);
+    } else if (ev === 'onActionClock') {
+      this.actionClock = normalizeActionClock(a.clock);
+      if (this.actionClock) this.actingIdx = this.actionClock.idx;
+    } else if (ev === 'onAction') {
+      this.actingIdx = 0;
+      this.actionClock = null;
+      const player = this.players[a.idx];
+      if (player && !snapshotHasPlayerActions) {
+        player.acted = true;
+        player.lastAction = {
+          key: a.key,
+          amount: Number(a.amount) || 0,
+          street: this.street,
+          round: this.round,
+        };
+        if (ATTACK_KEYS.has(a.key)) {
+          for (const other of this.players.slice(1)) {
+            if (other.idx !== a.idx) other.acted = false;
+          }
+        }
+      }
+    } else if (ev === 'onStreet') {
+      this.actingIdx = 0;
+      this.actionClock = null;
+      if (!snapshotHasPlayerActions) {
+        for (const player of this.players.slice(1)) {
+          player.acted = false;
+          if (!player.folded && !player.allIn) player.lastAction = null;
+        }
+      }
+    } else if (['onAllInReveal', 'onPotAwarded', 'onShowdown', 'onRoundEnd', 'onGameOver']
+      .includes(ev)) {
+      this.actingIdx = 0;
+      this.actionClock = null;
+    }
+
+    if (ev === 'onRoundStart') {
+      this.dealerIdx = a.dealerIdx ?? this.dealerIdx;
+      if (msg.s?.streetRaiseCount == null) this.streetRaiseCount = 0;
+      if (!msg.s?.lastAggressiveWager) this.lastAggressiveWager = null;
+    } else if (ev === 'onStreet') {
+      if (msg.s?.streetRaiseCount == null) this.streetRaiseCount = 0;
+      if (!msg.s?.lastAggressiveWager) this.lastAggressiveWager = null;
+    } else if (ev === 'onAction' && msg.s?.streetRaiseCount == null) {
+      if (ATTACK_KEYS.has(a.key) || (a.key === 'allin' && this.currentBet > previousCurrentBet)) {
+        this.streetRaiseCount++;
+      }
+    }
 
     if (ev === 'hole') {
       const p = this.players[this.myIdx];
@@ -130,7 +359,20 @@ export class RemoteEngine {
         playerName: r.name,
         hp: r.hp, alive: r.alive, deathRound: r.deathRound,
       }));
+      this.lastRanking = ranking;
       if (L.onGameOver) L.onGameOver(ranking);
+      return;
+    }
+    if (ev === 'onAllInReveal') {
+      const entrants = [];
+      for (const item of a.entrants || []) {
+        const p = this.players[item.seat];
+        if (!p) continue;
+        p.hole = (item.hole || []).map(card);
+        entrants.push(p);
+      }
+      if (L.onAllInReveal) L.onAllInReveal(entrants);
+      if (L.onSync) L.onSync();
       return;
     }
     if (ev === 'onShowdown') {
@@ -145,7 +387,11 @@ export class RemoteEngine {
       }
       const wonAmount = {};
       for (const [k, v] of Object.entries(a.won || {})) wonAmount[Number(k)] = v;
-      if (L.onShowdown) L.onShowdown({ entrants, wonAmount, totalPot: a.totalPot || 0 });
+      const netResult = {};
+      for (const [k, v] of Object.entries(a.net || {})) netResult[Number(k)] = v;
+      if (L.onShowdown) L.onShowdown({
+        entrants, wonAmount, netResult, totalPot: a.totalPot || 0, pots: a.pots || [],
+      });
       return;
     }
 
@@ -153,17 +399,32 @@ export class RemoteEngine {
     if (handler) {
       switch (ev) {
         case 'onLog': handler(a.text, a.kind); break;
+        case 'chat': handler(a); break;
         case 'onRoundStart': handler(a.round, a.blinds, a.dealerIdx); break;
         case 'onBlindsPosted': handler(a.sbIdx, a.sbAmt, a.bbIdx, a.bbAmt); break;
-        case 'onTurnStart': handler(a.idx); break;
-        case 'onAwaitAction': handler(a.idx, a.opts, a.remain); break;
+        case 'onTurnStart': handler(a.idx, a.clock || this.actionClock); break;
+        case 'onAwaitAction': handler(a.idx, a.opts, a.remain, a.clock || this.actionClock); break;
+        case 'onActionClock': handler(a.clock || this.actionClock); break;
         case 'onAction': handler(a.idx, a.key, a.amount); break;
         case 'onStreet': handler(a.street, a.revealTo); break;
-        case 'onSkill': handler(a.idx, a.skillName); break;
+        case 'onSkill': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
+        case 'onPassive': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
+        case 'onSkillEffect': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
         case 'onQuote': handler(a.idx, a.text); break;
-        case 'onPeek': handler(a.idx, card(a.card), a.slot); break;
-        case 'onSpy': handler(a.idx, a.targetIdx, a.cardIdx, card(a.card)); break;
-        case 'onPotAwarded': handler(a.winners, a.amount, a.uncontested, a.bonus); break;
+        case 'onSkillResult': {
+          const result = { ...a.result };
+          if (result.card) result.card = card(result.card);
+          handler(a.idx, result);
+          break;
+        }
+        case 'onSkillPublicResult': {
+          const result = { ...a.result };
+          if (result.card) result.card = card(result.card);
+          handler(a.idx, result);
+          break;
+        }
+        case 'onPotAwarded':
+          handler(a.winners, a.amount, a.uncontested, a.bonus, a.netWinnings); break;
         case 'onDeath': handler(a.idx); break;
         case 'onRoundEnd': handler(a.round); break;
         case 'onDeal': handler(); break;

@@ -3,7 +3,12 @@
 // 数值来源：《群英决》策划案 V1.3 · 第十章 数值总表
 // ============================================================================
 
-export const PLAYER_COUNT = 6;
+export const DEFAULT_TABLE_SIZE = 6;
+export const SUPPORTED_TABLE_SIZES = Object.freeze([6, 9]);
+export const MAX_TABLE_SIZE = 9;
+// Backward-compatible name for local/single-player callers. Runtime engines
+// use their own `tableSize` so six-seat and nine-seat games can coexist.
+export const PLAYER_COUNT = DEFAULT_TABLE_SIZE;
 export const MAX_ROUNDS = 12;
 export const INIT_HP = 1500;
 export const INIT_ENERGY = 2;
@@ -59,22 +64,23 @@ export const HAND_NAMES = {
 
 export const BOARD_SLOT_NAMES = [null, '天时', '天时', '天时', '地利', '人和'];
 
-// AI 性格参数（策划案 第八章）
+// AI 性格只对均衡基线做小幅扰动，避免退化成固定阈值脚本。
 export const AI_STYLES = [
-  { key: 'aggressive', name: '激进', raiseThreshold: 0.52, callAdj: -0.05, bluffRate: 0.22 },
-  { key: 'tight', name: '紧手', raiseThreshold: 0.68, callAdj: 0.04, bluffRate: 0.05 },
-  { key: 'bluffer', name: '诈唬', raiseThreshold: 0.60, callAdj: 0.00, bluffRate: 0.32 },
-  { key: 'tag', name: '紧凶', raiseThreshold: 0.62, callAdj: 0.06, bluffRate: 0.10 },
-  { key: 'loose', name: '松浪', raiseThreshold: 0.46, callAdj: -0.08, bluffRate: 0.18 },
+  { key: 'aggressive', name: '激进', looseness: 0.02, aggression: 0.10, bluffFactor: 1.12 },
+  { key: 'tight', name: '紧手', looseness: -0.05, aggression: -0.01, bluffFactor: 0.72 },
+  { key: 'bluffer', name: '诈唬', looseness: 0.01, aggression: 0.05, bluffFactor: 1.28 },
+  { key: 'tag', name: '紧凶', looseness: -0.02, aggression: 0.06, bluffFactor: 0.88 },
+  { key: 'loose', name: '松浪', looseness: 0.06, aggression: -0.01, bluffFactor: 1.05 },
 ];
 
-export const AI_SIMS = 80;
+export const AI_SIMS = 180;
 export const PLAYER_SIMS = 150;
-export const AI_SKILL_RATE = 0.4;
+export const ADVICE_SIMS = 360;
+export const AI_SKILL_RATE = 0.62;
 
-export const LBW_PASSIVE_BONUS = 0.10;
-export const LBW_ACTIVE_BONUS = 0.30;
-export const LP_REFUND_RATIO = 0.50;
+// 技能只允许小额保险，不得显著改变德州结算。
+export const SKILL_REBATE_RATIO = 0.10;
+export const SKILL_REBATE_CAP = 50;
 
 /** 数额取整到5 */
 export function roundAmount(n) {
@@ -90,14 +96,14 @@ export function getBlinds(round) {
   return BLIND_SCHEDULE[level - 1];
 }
 
-// 牌面/花色/牌背资源（与 Maker 版共用同一批 PNG）
-export const CARD_FACE_IMG = 'assets/card_face_paper_20260705141642.png';
-export const CARD_BACK_IMG = 'assets/card_back_feng_20260705141642.png';
+// 牌面/花色/牌背资源（noname 素材迁移版）
+export const CARD_FACE_IMG = 'assets/card/handcard.png';
+export const CARD_BACK_IMG = 'assets/card/cardback_scroll.png';
 export const SUIT_IMGS = {
-  1: 'assets/suit_spade_20260705154216.png',
-  2: 'assets/suit_heart_20260705154216.png',
-  3: 'assets/suit_diamond_20260705154216.png',
-  4: 'assets/suit_club_20260705154216.png',
+  1: 'assets/card/lukai_spade.png',
+  2: 'assets/card/lukai_heart.png',
+  3: 'assets/card/lukai_diamond.png',
+  4: 'assets/card/lukai_club.png',
 };
 export const RANK_FACE_IMGS = {
   2: 'assets/rankb_02_20260705150419.png',
@@ -114,4 +120,4 @@ export const RANK_FACE_IMGS = {
   13: 'assets/rankc_K_20260705154216.png',
   14: 'assets/rankc_A_20260705154216.png',
 };
-export const BG_IMG = 'assets/bg_battle_20260705125919.png';
+export const BG_IMG = 'assets/bg/zhulin_bg.jpg';

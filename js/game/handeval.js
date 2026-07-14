@@ -147,3 +147,25 @@ export function describe(cards) {
   const info = HAND_NAMES[cat];
   return { cat, name: info.name, poker: info.poker, core };
 }
+
+const cardSignature = (card) => `${card?.rank || 0}:${card?.suit || 0}`;
+
+/**
+ * UI strong-hand policy shared by PC and H5.
+ *
+ * Three of a kind and above keep the existing strong-hand threshold. A two
+ * pair only qualifies when both distinct hole cards are part of the paired
+ * ranks selected into the best hand. This rejects a public pair plus one
+ * personal pair, a pocket pair plus a public pair, and board-only two pair.
+ */
+export function isPlayerMadeStrongHand(current, hole = []) {
+  const category = Number(current?.cat) || 0;
+  if (category > 3) return true;
+  if (category !== 3 || !Array.isArray(hole) || hole.length !== 2) return false;
+  const [first, second] = hole;
+  if (!Number.isFinite(first?.rank) || !Number.isFinite(first?.suit)
+    || !Number.isFinite(second?.rank) || !Number.isFinite(second?.suit)
+    || first.rank === second.rank) return false;
+  const coreCards = new Set((current?.core || []).map(cardSignature));
+  return coreCards.has(cardSignature(first)) && coreCards.has(cardSignature(second));
+}
