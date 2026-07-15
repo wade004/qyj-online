@@ -207,6 +207,66 @@ test('6 人桌真人容量为 6，第 7 名真人被拒绝', async () => {
   }
 });
 
+test('同一登录账号重复加入同一房间时接管原席位而不重复占座', async () => {
+  const { server, port } = await openServer({ heartbeatMs: 0 });
+  const sockets = [];
+  try {
+    const account = await registerTestAccount(server, { nickname: '阳顶天' });
+    const owner = new WebSocket(
+      `ws://127.0.0.1:${port}`,
+      withAuthCookie(account.cookie),
+    );
+    sockets.push(owner);
+    await timeout(once(owner, 'open'), 2_000, '房主连接');
+
+    const created = waitForMessage(owner, (msg) => msg.ev === 'team', '创建房间');
+    owner.send(JSON.stringify({ cmd: 'create', tableSize: 6 }));
+    const room = await created;
+    assert.equal(room.a.members.length, 1);
+
+    const duplicate = new WebSocket(
+      `ws://127.0.0.1:${port}`,
+      withAuthCookie(account.cookie),
+    );
+    sockets.push(duplicate);
+    await timeout(once(duplicate, 'open'), 2_000, '同账号新连接');
+
+    const replaced = waitForMessage(
+      owner,
+      (msg) => msg.ev === 'error' && msg.a.code === ERROR_CODES.ROOM_SEAT_REPLACED,
+      '原连接收到席位接管通知',
+    );
+    const joined = waitForMessage(
+      duplicate,
+      (msg) => msg.ev === 'team' && msg.a.id === room.a.id,
+      '新连接接管席位',
+    );
+    duplicate.send(JSON.stringify({ cmd: 'join', teamId: room.a.id }));
+    await replaced;
+    const reclaimedRoom = await joined;
+
+    assert.equal(reclaimedRoom.a.members.length, 1);
+    assert.equal(reclaimedRoom.a.members[0].playerId, account.profile.playerId);
+    assert.equal(reclaimedRoom.a.members[0].name, '阳顶天');
+    assert.equal(reclaimedRoom.a.members[0].isOwner, true);
+    assert.equal(reclaimedRoom.a.members[0].isYou, true);
+
+    const other = await openClient(server, port);
+    sockets.push(other);
+    const otherJoined = waitForMessage(
+      other,
+      (msg) => msg.ev === 'team' && msg.a.id === room.a.id && msg.a.members.length === 2,
+      '其他账号加入房间',
+    );
+    other.send(JSON.stringify({ cmd: 'join', teamId: room.a.id }));
+    const twoPlayerRoom = await otherJoined;
+    assert.equal(new Set(twoPlayerRoom.a.members.map((member) => member.playerId)).size, 2);
+  } finally {
+    for (const socket of sockets) socket.close();
+    await server.close();
+  }
+});
+
 test('超过消息上限时使用标准 1009 关闭码', async () => {
   const { server, port } = await openServer({ maxPayload: 128, heartbeatMs: 0 });
   const ws = await openClient(server, port, {}, false);

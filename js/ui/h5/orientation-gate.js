@@ -11,13 +11,28 @@ function isTextEntry(element = document.activeElement) {
     || element?.isContentEditable === true;
 }
 
+export function isH5ViewportUsable({
+  width,
+  height,
+  landscape,
+  textEntry = false,
+} = {}) {
+  const viewportWidth = Math.max(0, Number(width) || 0);
+  const viewportHeight = Math.max(0, Number(height) || 0);
+  if (viewportWidth >= 568 && viewportHeight >= 320) return true;
+  // iOS Chrome/Safari can temporarily shrink the reported viewport when a
+  // text field receives focus. The screen was already admitted before the
+  // field could be focused, so keep it interactive until editing finishes.
+  return Boolean(landscape && textEntry && viewportHeight >= 180);
+}
+
 function isLargeEnough() {
-  if (window.innerWidth < 568) return false;
-  if (window.innerHeight >= 320) return true;
-  // Mobile keyboards can shrink the landscape visual viewport below the
-  // gameplay minimum while the user is filling an account form. Keep the
-  // current landscape screen interactive until the input loses focus.
-  return isLandscape() && isTextEntry() && window.innerHeight >= 180;
+  return isH5ViewportUsable({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    landscape: isLandscape(),
+    textEntry: isTextEntry(),
+  });
 }
 
 export function mountOrientationGate({ stage, gateRoot, onStarted, isOnlineBattle = () => false }) {

@@ -6,8 +6,19 @@ import {
   classifyH5PremiumStartingHand,
   shouldRenderH5PortraitReveal,
 } from '../js/ui/h5/battle-view.js';
+import { isH5ViewportUsable } from '../js/ui/h5/orientation-gate.js';
 
 const card = (rank, suit) => ({ rank, suit });
+
+assert.equal(isH5ViewportUsable({
+  width: 874, height: 402, landscape: true, textEntry: false,
+}), true, 'iPhone 17 Pro 横屏视口应正常进入');
+assert.equal(isH5ViewportUsable({
+  width: 430, height: 250, landscape: true, textEntry: true,
+}), true, 'iOS 输入聚焦后的临时缩放不应触发屏幕过小拦截');
+assert.equal(isH5ViewportUsable({
+  width: 430, height: 250, landscape: true, textEntry: false,
+}), false, '非输入状态仍需执行最小横屏尺寸限制');
 
 assert.equal(shouldRenderH5PortraitReveal(1, 1), false,
   '主角亮牌只保留在专用手牌区，不重复覆盖头像');

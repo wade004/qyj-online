@@ -113,6 +113,8 @@ async function battleLayoutSnapshot(page) {
     const table = box(document.querySelector('.h5-table'));
     const dock = box(document.querySelector('.h5-battle__dock'));
     const seats = [...document.querySelectorAll('.h5-seat')].map(box);
+    const selfSeat = box(document.querySelector('.h5-me__seat-card'));
+    const actionButtons = [...document.querySelectorAll('.h5-action-area .h5-actions button')].map(box);
     const overlaps = [];
     seats.forEach((seat, index) => seats.slice(index + 1).forEach((other, offset) => {
       if (intersects(seat, other) > 1) overlaps.push([index, index + offset + 1]);
@@ -121,6 +123,8 @@ async function battleLayoutSnapshot(page) {
       table,
       dock,
       seats,
+      selfSeat,
+      actionButtons,
       overlaps,
       outsideTable: seats.map((seat, index) => ({ seat, index })).filter(({ seat }) => (
         seat.left < table.left - 1 || seat.right > table.right + 1
@@ -140,7 +144,10 @@ async function settlementOverlaySnapshot(page) {
     const hp = seat.querySelector('.h5-seat__hp');
     const action = seat.querySelector('.h5-seat__action');
     const heroName = seat.querySelector('.h5-seat__hero-name');
+    const seatNo = seat.querySelector('.h5-seat__seat-no');
+    const energy = seat.querySelector('.h5-seat__energy');
     const skillIcons = [...seat.querySelectorAll(':scope > .h5-seat__skill')];
+    const vitalRow = [seatNo, hp, energy];
     const reveal = document.createElement('span');
     reveal.className = 'h5-seat-hole-reveal h5-settlement-reveal';
     const cards = document.createElement('span');
@@ -168,9 +175,15 @@ async function settlementOverlaySnapshot(page) {
 
     const annotationsHiddenDuringReveal = getComputedStyle(heroName).visibility === 'hidden'
       && skillIcons.every((icon) => getComputedStyle(icon).visibility === 'hidden');
+    const vitalsHiddenDuringReveal = vitalRow.every((node) => (
+      getComputedStyle(node).visibility === 'hidden' && Number(getComputedStyle(node).opacity) === 0
+    ));
     seat.classList.remove('is-revealing-hole');
     const annotationsRestoredAfterReveal = getComputedStyle(heroName).visibility !== 'hidden'
       && skillIcons.every((icon) => getComputedStyle(icon).visibility !== 'hidden');
+    const vitalsRestoredAfterReveal = vitalRow.every((node) => (
+      getComputedStyle(node).visibility !== 'hidden' && Number(getComputedStyle(node).opacity) > 0
+    ));
 
     const delta = document.createElement('strong');
     delta.className = 'h5-chip-delta is-loss';
@@ -180,6 +193,8 @@ async function settlementOverlaySnapshot(page) {
     const portraitRect = portrait.getBoundingClientRect();
     const revealRect = reveal.getBoundingClientRect();
     const cardRect = cards.firstElementChild.getBoundingClientRect();
+    const cardsRect = cards.getBoundingClientRect();
+    const handRect = hand.getBoundingClientRect();
     const publicRevealRect = publicReveal.getBoundingClientRect();
     const publicCardRect = publicReveal.querySelector('.h5-card').getBoundingClientRect();
     const hpRect = hp.getBoundingClientRect();
@@ -195,6 +210,8 @@ async function settlementOverlaySnapshot(page) {
       revealVitalClearance: hpRect.top - revealRect.bottom,
       cardWidth: cardRect.width,
       cardHeight: cardRect.height,
+      revealHeight: revealRect.height,
+      handBelowCards: handRect.top >= cardsRect.bottom + 1,
       publicRevealMatchesSettlement: Math.abs(publicRevealRect.left - revealRect.left) <= 1
         && Math.abs(publicRevealRect.top - revealRect.top) <= 1
         && Math.abs(publicRevealRect.width - revealRect.width) <= 1
@@ -203,6 +220,8 @@ async function settlementOverlaySnapshot(page) {
         && Math.abs(publicCardRect.height - cardRect.height) <= 1,
       annotationsHiddenDuringReveal,
       annotationsRestoredAfterReveal,
+      vitalsHiddenDuringReveal,
+      vitalsRestoredAfterReveal,
       deltaHost: delta.parentElement.className,
       deltaInsideAction: deltaRect.left >= actionRect.left - 1
         && deltaRect.right <= actionRect.right + 1
@@ -245,6 +264,9 @@ test('唯一入口：根地址只加载 H5 联网版，竖屏受阻且 PC/旧 H5
     await user.page.setViewportSize({ width: 844, height: 390 });
     await user.page.getByTestId('h5-enter-landscape').click();
     await expect(user.page.getByTestId('h5-auth')).toBeVisible({ timeout: 10_000 });
+    await expect(user.page.getByTestId('h5-auth-identifier')).toHaveCSS('font-size', '16px');
+    await user.page.getByTestId('h5-auth-identifier').focus();
+    await expect(user.page.locator('#h5-orientation-gate')).toBeHidden();
     await expect(user.page.getByTestId('h5-mode-single')).toHaveCount(0);
     await expect(user.page.getByTestId('h5-mode-online')).toHaveCount(0);
 
@@ -494,7 +516,7 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
         handInsideSelf: hand.left >= self.left - 8 && hand.right <= self.right + 8
           && hand.top >= self.top - 8 && hand.bottom <= self.bottom + 8,
         handIsRightBay: hand.left >= selfSeatCard.right && hand.width < selfSeatCard.width,
-        sideReserved: actionArea.right <= side.left + 1 && side.width >= 160,
+        sideReserved: actionArea.right <= side.left + 1 && side.width >= 148,
         advisorContained: advisor.getBoundingClientRect().right <= actionArea.right + 1
           && advisor.getBoundingClientRect().left >= actionArea.left - 1,
       };
@@ -559,7 +581,8 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
     const settlementOverlay = await settlementOverlaySnapshot(user.page);
     expect(settlementOverlay.revealHost).toContain('h5-seat__portrait');
     expect(settlementOverlay.revealInsidePortrait).toBe(true);
-    expect(settlementOverlay.revealAboveVitals).toBe(true);
+    expect(settlementOverlay.vitalsHiddenDuringReveal).toBe(true);
+    expect(settlementOverlay.vitalsRestoredAfterReveal).toBe(true);
     expect(settlementOverlay.deltaHost).toContain('h5-seat__action');
     expect(settlementOverlay.deltaInsideAction).toBe(true);
     expect(settlementOverlay.deltaCentered).toBe(true);
@@ -572,6 +595,11 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
     expect(sixSeatLayout.outsideTable).toEqual([]);
     expect(sixSeatLayout.touchingDock).toEqual([]);
     expect(sixSeatLayout.overlaps).toEqual([]);
+    expect(Math.min(...sixSeatLayout.seats.map((seat) => seat.width))).toBeGreaterThanOrEqual(180);
+    expect(Math.min(...sixSeatLayout.seats.map((seat) => seat.height))).toBeGreaterThanOrEqual(112);
+    expect(sixSeatLayout.dock.height).toBeGreaterThanOrEqual(126);
+    expect(sixSeatLayout.selfSeat.height).toBeGreaterThanOrEqual(117);
+    expect(Math.min(...sixSeatLayout.actionButtons.map((button) => button.height))).toBeGreaterThanOrEqual(32);
     const sixSeatArc = await user.page.evaluate(() => {
       const table = document.querySelector('.h5-table').getBoundingClientRect();
       return ['.h5-seat--1', '.h5-seat--5'].map((selector) => {
@@ -579,8 +607,23 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
         return ((seat.top + seat.height / 2) - table.top) / table.height;
       });
     });
-    expect(Math.min(...sixSeatArc)).toBeGreaterThan(.57);
-    expect(Math.max(...sixSeatArc)).toBeLessThan(.64);
+    expect(Math.min(...sixSeatArc)).toBeGreaterThan(.72);
+    expect(Math.max(...sixSeatArc)).toBeLessThan(.78);
+
+    for (const viewport of [
+      { width: 874, height: 402 },
+      { width: 932, height: 430 },
+    ]) {
+      await user.page.setViewportSize(viewport);
+      const phoneLayout = await battleLayoutSnapshot(user.page);
+      expect(phoneLayout.outsideTable, `${viewport.width}x${viewport.height}`).toEqual([]);
+      expect(phoneLayout.touchingDock, `${viewport.width}x${viewport.height}`).toEqual([]);
+      expect(phoneLayout.overlaps, `${viewport.width}x${viewport.height}`).toEqual([]);
+      expect(phoneLayout.dock.height, `${viewport.width}x${viewport.height}`).toBeGreaterThanOrEqual(126);
+      expect(Math.min(...phoneLayout.seats.map((seat) => seat.width)), `${viewport.width}x${viewport.height}`)
+        .toBeGreaterThanOrEqual(180);
+    }
+    await user.page.setViewportSize({ width: 844, height: 390 });
 
     const opponentSkill = user.page.locator('.h5-seat__skill').first();
     await opponentSkill.hover();
@@ -644,10 +687,26 @@ test('联网单人玩法：一名真人可创建 9 人桌，服务器补 8 名�
     expect(compactLayout.outsideTable, '844x390').toEqual([]);
     expect(compactLayout.touchingDock, '844x390').toEqual([]);
     expect(compactLayout.overlaps, '844x390').toEqual([]);
+    expect(Math.min(...compactLayout.seats.map((seat) => seat.width)), '844x390').toBeGreaterThanOrEqual(124);
+    expect(Math.min(...compactLayout.seats.map((seat) => seat.height)), '844x390').toBeGreaterThanOrEqual(96);
+    expect(compactLayout.dock.height, '844x390').toBeGreaterThanOrEqual(126);
+    expect(Math.min(...compactLayout.actionButtons.map((button) => button.height)), '844x390')
+      .toBeGreaterThanOrEqual(32);
     expect(compactSettlement.revealInsidePortrait, '844x390').toBe(true);
-    expect(compactSettlement.revealVitalClearance, '844x390').toBeGreaterThanOrEqual(-1);
+    expect(compactSettlement.revealHeight, '844x390').toBeGreaterThanOrEqual(52);
+    expect(compactSettlement.handBelowCards, '844x390').toBe(true);
+    expect(compactSettlement.vitalsHiddenDuringReveal, '844x390').toBe(true);
+    expect(compactSettlement.vitalsRestoredAfterReveal, '844x390').toBe(true);
     expect(compactSettlement.publicRevealMatchesSettlement, '844x390').toBe(true);
     expect(compactSettlement.publicCardMatchesSettlement, '844x390').toBe(true);
+
+    await user.page.setViewportSize({ width: 874, height: 402 });
+    await expect(user.page.locator('.h5-seat')).toHaveCount(8);
+    const iphoneLayout = await battleLayoutSnapshot(user.page);
+    expect(iphoneLayout.outsideTable, '874x402').toEqual([]);
+    expect(iphoneLayout.touchingDock, '874x402').toEqual([]);
+    expect(iphoneLayout.overlaps, '874x402').toEqual([]);
+    expect(iphoneLayout.dock.height, '874x402').toBeGreaterThanOrEqual(126);
 
     await user.page.setViewportSize({ width: 932, height: 430 });
     await expect(user.page.locator('.h5-seat')).toHaveCount(8);
@@ -657,15 +716,19 @@ test('联网单人玩法：一名真人可创建 9 人桌，服务器补 8 名�
     expect(layout.touchingDock).toEqual([]);
     expect(layout.overlaps).toEqual([]);
     expect(phoneSettlement.revealInsidePortrait, '932x430').toBe(true);
-    expect(phoneSettlement.revealVitalClearance, '932x430').toBeGreaterThanOrEqual(-1);
+    expect(phoneSettlement.revealHeight, '932x430').toBeGreaterThanOrEqual(52);
+    expect(phoneSettlement.handBelowCards, '932x430').toBe(true);
+    expect(phoneSettlement.vitalsHiddenDuringReveal, '932x430').toBe(true);
+    expect(phoneSettlement.vitalsRestoredAfterReveal, '932x430').toBe(true);
     expect(phoneSettlement.publicRevealMatchesSettlement, '932x430').toBe(true);
     expect(phoneSettlement.publicCardMatchesSettlement, '932x430').toBe(true);
-    // The compact seat is 74 logical pixels and may render up to about 81.6
-    // physical pixels as the landscape scale settles, while retaining clear gaps.
-    await expect(user.page.locator('.h5-seat').first()).toHaveCSS('--h5-seat-card-width', '74px');
-    expect(Math.min(...layout.seats.map((seat) => seat.width))).toBeGreaterThanOrEqual(74);
-    expect(Math.max(...layout.seats.map((seat) => seat.width))).toBeLessThanOrEqual(82);
-    expect(Math.max(...layout.seats.map((seat) => seat.height))).toBeLessThanOrEqual(88);
+    // The 124x96 logical card scales with the landscape stage, filling the
+    // perimeter while leaving a small collision-safe gutter between seats.
+    await expect(user.page.locator('.h5-seat').first()).toHaveCSS('--h5-seat-card-width', '124px');
+    expect(Math.min(...layout.seats.map((seat) => seat.width))).toBeGreaterThanOrEqual(124);
+    expect(Math.max(...layout.seats.map((seat) => seat.width))).toBeLessThanOrEqual(138);
+    expect(Math.min(...layout.seats.map((seat) => seat.height))).toBeGreaterThanOrEqual(96);
+    expect(Math.max(...layout.seats.map((seat) => seat.height))).toBeLessThanOrEqual(107);
 
     const additionalViewports = [
       { width: 1024, height: 576 },
@@ -684,7 +747,8 @@ test('联网单人玩法：一名真人可创建 9 人桌，服务器补 8 名�
         expect(responsiveLayout.outsideTable, `${viewport.width}x${viewport.height}`).toEqual([]);
         expect(responsiveLayout.touchingDock, `${viewport.width}x${viewport.height}`).toEqual([]);
         expect(responsiveLayout.overlaps, `${viewport.width}x${viewport.height}`).toEqual([]);
-        expect(settlementLayout.revealAboveVitals, `${viewport.width}x${viewport.height}`).toBe(true);
+        expect(settlementLayout.vitalsHiddenDuringReveal, `${viewport.width}x${viewport.height}`).toBe(true);
+        expect(settlementLayout.vitalsRestoredAfterReveal, `${viewport.width}x${viewport.height}`).toBe(true);
         expect(settlementLayout.deltaInsideAction, `${viewport.width}x${viewport.height}`).toBe(true);
         expect(settlementLayout.deltaCentered, `${viewport.width}x${viewport.height}`).toBe(true);
         expect(settlementLayout.publicRevealMatchesSettlement, `${viewport.width}x${viewport.height}`).toBe(true);

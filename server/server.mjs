@@ -1266,6 +1266,45 @@ export function startServer(port = 8790, {
     broadcastLobby();
   }
 
+  function claimExistingLobbySeat(team, client) {
+    if (!client.playerId || team?.phase !== 'lobby') return false;
+    const matchingIds = team.members.filter((id) => (
+      id !== client.id && clients.get(id)?.playerId === client.playerId
+    ));
+    if (matchingIds.length === 0) return false;
+
+    const matchingSet = new Set(matchingIds);
+    const firstIndex = Math.min(...matchingIds.map((id) => team.members.indexOf(id)));
+    const wasOwner = matchingSet.has(team.ownerId);
+    const preservedPick = team.picks?.[client.id]
+      || matchingIds.map((id) => team.picks?.[id]).find(Boolean)
+      || null;
+
+    team.members = team.members.filter((id) => id !== client.id && !matchingSet.has(id));
+    team.members.splice(Math.min(firstIndex, team.members.length), 0, client.id);
+    if (wasOwner) team.ownerId = client.id;
+    if (team.picks) {
+      for (const id of matchingIds) delete team.picks[id];
+      if (preservedPick) team.picks[client.id] = preservedPick;
+    }
+
+    client.teamId = team.id;
+    for (const id of matchingIds) {
+      const previous = clients.get(id);
+      if (!previous || previous === client) continue;
+      if (previous.teamId === team.id) {
+        previous.teamId = null;
+        previous.seat = null;
+        previous.pendingResult = null;
+      }
+      if (previous.connected) {
+        fail(previous, ERROR_CODES.ROOM_SEAT_REPLACED, '当前账号的房间席位已由新连接接管');
+        sendLobbyTo(previous);
+      }
+    }
+    return true;
+  }
+
   function invalidateClientAuth(client, code = ERROR_CODES.AUTH_SESSION_INVALID) {
     if (!client) return;
     const ws = client.ws;
@@ -1367,10 +1406,11 @@ export function startServer(port = 8790, {
       if (!clientSupportsTableSize(client, tableSize)) {
         return fail(client, ERROR_CODES.CLIENT_UPGRADE_REQUIRED, '当前客户端不支持该桌型，请升级后重试');
       }
-      if (team.members.length >= tableSize) {
+      const reclaimedExistingSeat = claimExistingLobbySeat(team, client);
+      if (!reclaimedExistingSeat && team.members.length >= tableSize) {
         return fail(client, ERROR_CODES.ROOM_FULL, '该队伍已满员');
       }
-      team.members.push(client.id);
+      if (!reclaimedExistingSeat) team.members.push(client.id);
       client.teamId = team.id;
       sendTeamState(team);
       broadcastLobby();

@@ -4177,7 +4177,10 @@ body.h5-is-blocked #h5-stage {
   border-radius: 6px;
   background: rgba(5, 4, 3, .63);
   box-shadow: inset 0 1px 4px rgba(0, 0, 0, .35);
-  font-size: 8px;
+  /* iOS WebKit auto-zooms focused form controls below 16px, including in
+     Chrome. Keep the control at the native accessibility threshold. */
+  font-size: 16px !important;
+  line-height: 1;
 }
 
 .h5-auth__input::placeholder { color: #746a59; }
@@ -4292,7 +4295,7 @@ body.h5-is-blocked #h5-stage {
   .h5-auth__scroll { padding: 5px 8px 7px; scroll-padding-bottom: 48px; }
   .h5-auth__form { gap: 3px 5px; }
   .h5-auth__field { gap: 2px; font-size: 6px; }
-  .h5-auth__input { height: 27px; padding-inline: 6px; font-size: 7px; }
+  .h5-auth__input { height: 27px; padding-inline: 6px; font-size: 16px !important; }
   .h5-auth__submit { min-height: 27px; height: 27px; font-size: 7px; }
   .h5-auth__links { min-height: 27px; }
   .h5-auth__link { min-height: 23px; font-size: 6px; }
@@ -6798,6 +6801,9 @@ body.h5-is-blocked #h5-stage {
   top: 36%;
   width: calc(100% - 8px);
   max-width: calc(100% - 8px);
+  min-height: 58px;
+  grid-template-rows: auto auto;
+  align-content: center;
   gap: 2px;
   padding: 4px 3px 3px;
 }
@@ -6821,8 +6827,9 @@ body.h5-is-blocked #h5-stage {
 @media (max-width: 960px), (max-height: 440px) {
   .h5-seat-hole-reveal {
     top: 31%;
-    gap: 0;
-    padding: 1px 2px;
+    min-height: 62px;
+    gap: 3px;
+    padding: 3px 2px;
   }
   .h5-card--seat-reveal { height: 34px; }
   .h5-public-hole-reveal > .h5-seat-hole-reveal__label,
@@ -6832,6 +6839,9 @@ body.h5-is-blocked #h5-stage {
     top: 28%;
     width: calc(100% - 6px);
     max-width: calc(100% - 6px);
+    min-height: 52px;
+    gap: 2px;
+    padding: 3px 2px;
   }
   .h5-table[data-player-count='9'] .h5-card--seat-reveal {
     width: 22px;
@@ -6849,4 +6859,207 @@ body.h5-is-blocked #h5-stage {
   .h5-card--seat-reveal { height: 38px; }
   .h5-public-hole-reveal > .h5-seat-hole-reveal__label,
   .h5-settlement-reveal > .h5-seat-hole-reveal__label { font-size: 5px; }
+}
+
+/* --------------------------------------------------------------------------
+   Mobile landscape density pass
+   Use the 844x390 reference stage instead of shrinking desktop proportions.
+   Six-seat tables get three broad top portraits; nine-seat tables fill the
+   perimeter with only a narrow visual gutter. The command deck gains enough
+   height for readable touch targets without covering the table.
+   -------------------------------------------------------------------------- */
+@media (max-width: 960px), (max-height: 440px) {
+  .h5-battle {
+    grid-template-rows: 34px minmax(0, 1fr) 126px !important;
+  }
+
+  .h5-battle__dock {
+    grid-template-columns: 280px minmax(0, 1fr) 150px !important;
+    gap: 3px !important;
+    padding: 4px !important;
+  }
+
+  /* Six players: the three top seats nearly touch; flank seats sit below them. */
+  .h5-table[data-player-count='6'] .h5-seat {
+    --h5-seat-card-width: 180px !important;
+    --h5-seat-card-height: 112px !important;
+    width: var(--h5-seat-card-width) !important;
+    height: var(--h5-seat-card-height) !important;
+    min-height: var(--h5-seat-card-height) !important;
+  }
+  .h5-table[data-player-count='6'] .h5-seat--2,
+  .h5-table[data-player-count='6'] .h5-seat--3,
+  .h5-table[data-player-count='6'] .h5-seat--4 {
+    top: 2px !important;
+  }
+  .h5-table[data-player-count='6'] .h5-seat--1,
+  .h5-table[data-player-count='6'] .h5-seat--5 {
+    top: calc(73% + var(--h5-seat-meta-height) / 2) !important;
+  }
+
+  /* Nine players: four top seats plus two on each flank, with 15-20px gutters. */
+  .h5-table[data-player-count='9'] .h5-seat {
+    --h5-seat-card-width: 124px !important;
+    --h5-seat-card-height: 96px !important;
+    width: var(--h5-seat-card-width) !important;
+    height: var(--h5-seat-card-height) !important;
+    min-height: var(--h5-seat-card-height) !important;
+  }
+  .h5-table[data-player-count='9'] .h5-seat--1,
+  .h5-table[data-player-count='9'] .h5-seat--8 {
+    top: calc(76% + var(--h5-seat-meta-height) / 2) !important;
+  }
+  .h5-table[data-player-count='9'] .h5-seat--2,
+  .h5-table[data-player-count='9'] .h5-seat--7 {
+    top: calc(22% + var(--h5-seat-meta-height) / 2) !important;
+  }
+  .h5-table[data-player-count='9'] .h5-seat--3,
+  .h5-table[data-player-count='9'] .h5-seat--4,
+  .h5-table[data-player-count='9'] .h5-seat--5,
+  .h5-table[data-player-count='9'] .h5-seat--6 {
+    top: 2px !important;
+  }
+
+  .h5-seat {
+    --h5-seat-name-height: 14px !important;
+    --h5-seat-portrait-top: 17px !important;
+    --h5-seat-meta-height: 12px !important;
+    --h5-seat-status-height: 13px !important;
+    --h5-seat-energy-width: 14px !important;
+    --h5-seat-skill-size: 18px !important;
+    --h5-seat-skill-visual: 16px !important;
+  }
+  .h5-seat__name {
+    right: 19px !important;
+    left: 18px !important;
+    font-size: 7px !important;
+    line-height: var(--h5-seat-name-height) !important;
+  }
+  .h5-seat__hero-name { font-size: 7px !important; }
+  .h5-seat__hp-text,
+  .h5-seat__action.h5-player-status { font-size: 6.5px !important; }
+  .h5-seat__skill-glyph { font-size: 7px !important; }
+  .h5-seat.is-dealer::after {
+    width: 13px !important;
+    height: 13px !important;
+    font-size: 5px !important;
+  }
+  .h5-seat.is-dealer .h5-seat__name { left: 18px !important; }
+
+  .h5-table__center { top: 69% !important; }
+  .h5-card--board { width: 42px !important; height: 59px !important; }
+
+  .h5-me {
+    grid-template-columns: minmax(0, 60%) minmax(0, 40%) !important;
+    gap: 4px !important;
+  }
+  .h5-me__seat-card .h5-me__portrait { top: 19px !important; }
+  .h5-me__seat-card .h5-me__identity { height: 16px !important; }
+  .h5-me__seat-card .h5-me__identity > strong { font-size: 9px !important; }
+  .h5-me__seat-card .h5-me__hero-name { top: 22px !important; font-size: 6px !important; }
+  .h5-me__seat-card .h5-me__skills {
+    top: 21px !important;
+    right: 6px !important;
+    width: 19px !important;
+    height: 41px !important;
+  }
+  .h5-me__seat-card .h5-me__skills > .h5-skill-button,
+  .h5-me__seat-card .h5-me__skills > .h5-passive-button,
+  .h5-me__seat-card .h5-me__skills > .h5-stats-icon {
+    width: 19px !important;
+    min-width: 19px !important;
+    height: 19px !important;
+    min-height: 19px !important;
+    flex-basis: 19px !important;
+  }
+  .h5-me__seat-card .h5-skill-button__icon,
+  .h5-me__seat-card .h5-passive-button__icon {
+    width: 16px !important;
+    height: 16px !important;
+    font-size: 7px !important;
+  }
+  .h5-me__seat-card .h5-me__stats {
+    bottom: 23px !important;
+    height: 12px !important;
+  }
+  .h5-me__seat-card .h5-me__turn-tools {
+    bottom: 5px !important;
+    height: 16px !important;
+    grid-template-columns: minmax(0, 1fr) 31px !important;
+  }
+  .h5-me__seat-card .h5-me__turn-tools .h5-me__status,
+  .h5-me__seat-card .h5-me__turn-tools .h5-extend {
+    min-height: 16px !important;
+    height: 16px !important;
+    font-size: 5.5px !important;
+  }
+  .h5-me__seat-card .h5-me__turn-tools .h5-extend {
+    width: 31px !important;
+    min-width: 31px !important;
+    max-width: 31px !important;
+  }
+  .h5-me > .h5-hand {
+    grid-template-rows: minmax(0, 1fr) 14px !important;
+    padding: 4px !important;
+  }
+  .h5-me > .h5-hand .h5-card--hand {
+    width: 38px !important;
+    height: 54px !important;
+  }
+  .h5-me > .h5-hand .h5-hand__type {
+    font-size: 6.5px !important;
+    line-height: 14px !important;
+  }
+
+  .h5-action-area {
+    grid-template-rows: minmax(24px, auto) 13px minmax(0, 1fr) !important;
+    gap: 3px !important;
+  }
+  .h5-action-area > .h5-gto-advice {
+    min-height: 24px !important;
+    max-height: 30px !important;
+    font-size: 5.5px !important;
+  }
+  .h5-action-area > .h5-actions { max-height: none !important; }
+  .h5-action-area .h5-actions { gap: 4px !important; }
+  .h5-action-area .h5-actions button {
+    min-height: 32px !important;
+    font-size: 7px !important;
+  }
+
+  .h5-dock-side { grid-template-rows: 22px minmax(0, 1fr) !important; }
+  .h5-dock-tabs__tab { min-height: 21px !important; font-size: 6.5px !important; }
+  .h5-dock-panel[data-panel='chat'] { grid-template-rows: minmax(0, 1fr) 23px !important; }
+  .h5-chat-input,
+  .h5-chat-send { min-height: 19px !important; height: 19px !important; font-size: 6px !important; }
+
+  .h5-seat-hole-reveal { top: 34% !important; }
+  .h5-card--seat-reveal { width: 32px !important; height: 45px !important; }
+  .h5-table[data-player-count='9'] .h5-seat-hole-reveal {
+    top: 31% !important;
+    width: calc(100% - 8px) !important;
+    max-width: calc(100% - 8px) !important;
+  }
+  .h5-table[data-player-count='9'] .h5-card--seat-reveal {
+    width: 28px !important;
+    height: 34px !important;
+  }
+  .h5-table[data-player-count='9'] .h5-seat-hole-reveal__label { font-size: 5px !important; }
+}
+
+/* A revealed hand becomes the seat's visual focus. Hide the whole vital row
+   while cards are open and lower the reveal into the portrait's clear area. */
+.h5-seat.is-revealing-hole > .h5-seat__seat-no,
+.h5-seat.is-revealing-hole > .h5-seat__hp,
+.h5-seat.is-revealing-hole > .h5-seat__energy {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.h5-seat-hole-reveal { top: 42% !important; }
+
+@media (max-width: 960px), (max-height: 440px) {
+  .h5-seat-hole-reveal { top: 42% !important; }
+  .h5-table[data-player-count='9'] .h5-seat-hole-reveal { top: 40% !important; }
 }
