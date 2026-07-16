@@ -192,6 +192,7 @@ function dialog({
   confirmTestId = 'h5-dialog-confirm',
   danger = false,
   showCancel = true,
+  focusConfirm = true,
   onConfirm,
   onClose,
 }) {
@@ -218,7 +219,10 @@ function dialog({
   });
   const panel = element('section', {
     className: 'h5-dialog',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+    attrs: {
+      role: 'dialog', 'aria-modal': 'true', 'aria-label': title,
+      ...(!focusConfirm ? { tabindex: '-1' } : {}),
+    },
   }, [
     element('h2', { text: title }),
     typeof message === 'string' ? element('p', { text: message }) : message,
@@ -227,7 +231,13 @@ function dialog({
   const layer = element('div', { className: 'h5-dialog-layer' }, panel);
   layer.addEventListener('click', (event) => { if (event.target === layer) close(); });
   releaseEscape = trapEscape(panel, close);
-  queueMicrotask(() => confirm.focus());
+  queueMicrotask(() => {
+    if (focusConfirm) confirm.focus();
+    else {
+      panel.scrollTop = 0;
+      panel.focus({ preventScroll: true });
+    }
+  });
   return layer;
 }
 
@@ -621,6 +631,41 @@ export function mountH5App({ root }) {
         placeholder: '再次输入新密码', 'aria-label': '确认新密码', 'data-testid': 'h5-profile-confirm-password',
       },
     });
+    const profileAvatarId = Number(profile.avatarId);
+    let avatarId = Number.isSafeInteger(profileAvatarId) && profileAvatarId >= 1 && profileAvatarId <= 20
+      ? profileAvatarId : 1;
+    const avatarPreview = element('img', {
+      attrs: {
+        src: playerAvatarUrl(avatarId), alt: `当前头像 ${avatarId}`, draggable: 'false',
+        'data-testid': 'h5-profile-avatar-preview',
+      },
+    });
+    let avatarOptions = [];
+    avatarOptions = Array.from({ length: 20 }, (_, index) => {
+      const value = index + 1;
+      return button('', {
+        className: `h5-avatar-option${value === avatarId ? ' is-selected' : ''}`,
+        attrs: {
+          type: 'button', 'aria-label': `选择头像 ${value}`,
+          'aria-pressed': value === avatarId ? 'true' : 'false',
+          'data-testid': `h5-profile-avatar-${value}`,
+        },
+        on: {
+          click: () => {
+            avatarId = value;
+            avatarPreview.src = playerAvatarUrl(value);
+            avatarPreview.alt = `当前头像 ${value}`;
+            avatarOptions.forEach((item, itemIndex) => {
+              const selected = itemIndex + 1 === value;
+              item.classList.toggle('is-selected', selected);
+              item.setAttribute('aria-pressed', selected ? 'true' : 'false');
+            });
+          },
+        },
+      }, [element('img', {
+        attrs: { src: playerAvatarUrl(value), alt: '', draggable: 'false', loading: 'lazy' },
+      })]);
+    });
     let emblem = profile.emblem;
     const error = element('p', { className: 'h5-field-error', attrs: { 'aria-live': 'polite' } });
     const options = PLAYER_EMBLEMS.map((value) => button(value, {
@@ -639,6 +684,7 @@ export function mountH5App({ root }) {
           logout.textContent = '退出中…';
           nickname.disabled = true;
           for (const option of options) option.disabled = true;
+          for (const option of avatarOptions) option.disabled = true;
           try {
             const result = await onlineSession.logoutAccount();
             if (result === false || result?.ok === false) {
@@ -650,12 +696,23 @@ export function mountH5App({ root }) {
             logout.textContent = '重新退出';
             nickname.disabled = false;
             for (const option of options) option.disabled = false;
+            for (const option of avatarOptions) option.disabled = false;
           }
         },
       },
     });
     const body = element('div', { className: 'h5-profile-form' }, [
       element('p', { text: `玩家档案 · #${profile.shortId} · 服务端同步` }),
+      element('section', { className: 'h5-avatar-picker', attrs: { 'aria-label': '选择玩家头像' } }, [
+        element('div', { className: 'h5-avatar-picker__preview' }, [avatarPreview]),
+        element('div', { className: 'h5-avatar-picker__content' }, [
+          element('div', { className: 'h5-avatar-picker__heading' }, [
+            element('strong', { text: '玩家头像' }),
+            element('span', { text: '选择后保存，房间与聊天同步更新' }),
+          ]),
+          element('div', { className: 'h5-avatar-picker__grid' }, avatarOptions),
+        ]),
+      ]),
       element('section', {
         className: 'h5-account-panel',
         attrs: { 'data-testid': 'h5-account-panel', 'aria-label': '登录账号信息' },
@@ -699,6 +756,7 @@ export function mountH5App({ root }) {
       message: body,
       confirmText: '保存',
       confirmTestId: 'h5-profile-save',
+      focusConfirm: false,
       onConfirm: async () => {
         const checked = validateNickname(nickname.value);
         if (!checked.ok) { error.textContent = checked.reason; return false; }
@@ -742,7 +800,11 @@ export function mountH5App({ root }) {
             return false;
           }
         }
-        const result = await onlineSession.updatePlayerProfile({ nickname: checked.nickname, emblem });
+        const result = await onlineSession.updatePlayerProfile({
+          nickname: checked.nickname,
+          emblem,
+          avatarId,
+        });
         if (result === false || result?.ok === false || result?.saved === false) {
           error.textContent = result?.error?.message || result?.message || '当前无法保存，请恢复连接后重试';
           return false;
@@ -877,6 +939,23 @@ export function mountH5App({ root }) {
             }),
             button('◇ 档案', { className: 'h5-secondary-button', attrs: { 'data-testid': 'h5-profile-edit' }, on: { click: openH5Profile } }),
             button('↻ 刷新', { className: 'h5-secondary-button', on: { click: () => onlineSession.refreshLobby() } }),
+            button('⇥ 退出', {
+              className: 'h5-secondary-button h5-lobby-logout',
+              attrs: { 'data-testid': 'h5-lobby-logout', 'aria-label': '退出登录' },
+              on: {
+                click: () => root.appendChild(dialog({
+                  title: '退出登录',
+                  message: '退出当前账号并返回登录页面。本设备的一键登录凭据也会失效，下次需要重新登录。',
+                  confirmText: '确认退出',
+                  confirmTestId: 'h5-lobby-logout-confirm',
+                  danger: true,
+                  onConfirm: async () => {
+                    const result = await onlineSession.logoutAccount();
+                    return result !== false && result?.ok !== false;
+                  },
+                })),
+              },
+            }),
           ]),
         ]),
         list,

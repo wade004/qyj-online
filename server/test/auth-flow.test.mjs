@@ -394,11 +394,12 @@ test('HTTP account flow uses an HttpOnly cookie and supports me/logout/profile/r
     const edited = await requestJson(runtime.baseUrl, '/api/player/me', {
       method: 'PATCH',
       cookie: registered.cookie,
-      body: { nickname: '资料已改', emblem: PLAYER_EMBLEMS[3] },
+      body: { nickname: '资料已改', emblem: PLAYER_EMBLEMS[3], avatarId: 11 },
     });
     assert.equal(edited.response.status, 200);
     assert.equal(edited.payload.data.profile.nickname, '资料已改');
     assert.equal(edited.payload.data.profile.emblem, PLAYER_EMBLEMS[3]);
+    assert.equal(edited.payload.data.profile.avatarId, 11);
 
     const loggedOut = await requestJson(runtime.baseUrl, '/api/auth/logout', {
       method: 'POST',

@@ -61,9 +61,11 @@ test('guestId 建档后跨数据库重开保持稳定身份与资料', async () 
     const saved = firstStore.updateProfile(first.profile.playerId, {
       nickname: '持久客',
       emblem: '月',
+      avatarId: 12,
     });
     assert.equal(saved.nickname, '持久客');
     assert.equal(saved.emblem, '月');
+    assert.equal(saved.avatarId, 12);
     firstStore.close();
 
     now += 60_000;
@@ -79,7 +81,7 @@ test('guestId 建档后跨数据库重开保持稳定身份与资料', async () 
     assert.equal(again.profile.shortId, first.profile.shortId);
     assert.equal(again.profile.nickname, '持久客');
     assert.equal(again.profile.emblem, '月');
-    assert.equal(again.profile.avatarId, first.profile.avatarId);
+    assert.equal(again.profile.avatarId, 12);
     assert.equal(again.profile.createdAt, first.profile.createdAt);
     assert.equal(again.profile.lastSeenAt, new Date(now).toISOString());
     reopened.close();
@@ -90,7 +92,7 @@ test('guestId 建档后跨数据库重开保持稳定身份与资料', async () 
   });
 });
 
-test('资料更新安全校验并持久化昵称与纹章', async () => {
+test('资料更新安全校验并持久化昵称、纹章与头像', async () => {
   const store = createPlayerStore({ databasePath: ':memory:' });
   try {
     const { profile } = store.identify({
@@ -98,9 +100,12 @@ test('资料更新安全校验并持久化昵称与纹章', async () => {
       nickname: '  羽林郎  ',
       emblem: '侠',
     });
-    const updated = store.updateProfile(profile.playerId, { nickname: '墨客', emblem: '月' });
+    const updated = store.updateProfile(profile.playerId, {
+      nickname: '墨客', emblem: '月', avatarId: 20,
+    });
     assert.equal(updated.nickname, '墨客');
     assert.equal(updated.emblem, '月');
+    assert.equal(updated.avatarId, 20);
     assert.equal(store.getProfile(profile.playerId).nickname, '墨客');
 
     assertValidation(
@@ -110,6 +115,10 @@ test('资料更新安全校验并持久化昵称与纹章', async () => {
     assertValidation(
       () => store.updateProfile(profile.playerId, { emblem: '任意图片地址' }),
       'INVALID_EMBLEM',
+    );
+    assertValidation(
+      () => store.updateProfile(profile.playerId, { avatarId: 21 }),
+      'INVALID_AVATAR',
     );
     assertValidation(() => store.updateProfile(profile.playerId, {}), 'INVALID_PROFILE');
   } finally {

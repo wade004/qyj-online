@@ -433,6 +433,13 @@ test('H5 账号闭环：注册、退出并使用邮箱重新登录', async ({ br
     await user.page.getByTestId('h5-profile-edit').click();
     await expect(user.page.getByTestId('h5-account-username')).toHaveText(value.username);
     await expect(user.page.getByTestId('h5-account-email')).toHaveText(value.email);
+    await user.page.getByTestId('h5-profile-avatar-20').click();
+    await expect(user.page.getByTestId('h5-profile-avatar-preview'))
+      .toHaveAttribute('src', /avatar-20\.webp$/u);
+    await user.page.getByTestId('h5-profile-save').click();
+    await expect(user.page.getByTestId('h5-profile-save')).toHaveCount(0);
+    await user.page.getByTestId('h5-profile-edit').click();
+    await expect(user.page.getByTestId('h5-profile-avatar-20')).toHaveAttribute('aria-pressed', 'true');
     await user.page.getByTestId('h5-account-logout').click();
     await expect(user.page.getByTestId('h5-auth-quick')).toBeVisible({ timeout: 15_000 });
     await user.page.getByTestId('h5-auth-to-login').click();
@@ -442,6 +449,27 @@ test('H5 账号闭环：注册、退出并使用邮箱重新登录', async ({ br
     await user.page.getByTestId('h5-auth-password').fill(value.password);
     await user.page.getByTestId('h5-auth-submit').click();
     await expect(user.page.getByTestId('h5-online-lobby')).toBeVisible({ timeout: 15_000 });
+    expect(user.errors).toEqual([]);
+  } finally {
+    await user.context.close();
+  }
+});
+
+test('H5 联机大厅支持二次确认退出登录', async ({ browser }) => {
+  const user = await createUser(browser);
+  try {
+    await enterApp(user.page);
+    await register(user.page, account('lobby_logout'));
+    await expect(user.page.getByTestId('h5-online-lobby')).toBeVisible({ timeout: 15_000 });
+
+    await user.page.getByTestId('h5-lobby-logout').click();
+    await expect(user.page.locator('.h5-dialog')).toContainText('本设备的一键登录凭据也会失效');
+    await user.page.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(user.page.getByTestId('h5-online-lobby')).toBeVisible();
+
+    await user.page.getByTestId('h5-lobby-logout').click();
+    await user.page.getByTestId('h5-lobby-logout-confirm').click();
+    await expect(user.page.getByTestId('h5-auth-quick')).toBeVisible({ timeout: 15_000 });
     expect(user.errors).toEqual([]);
   } finally {
     await user.context.close();

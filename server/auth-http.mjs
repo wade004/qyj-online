@@ -381,6 +381,7 @@ export function createAuthHttpHandler({
         const profile = playerStore.updateProfile(session.playerId || session.profile?.playerId, {
           ...(Object.hasOwn(body, 'nickname') ? { nickname: body.nickname } : {}),
           ...(Object.hasOwn(body, 'emblem') ? { emblem: body.emblem } : {}),
+          ...(Object.hasOwn(body, 'avatarId') ? { avatarId: body.avatarId } : {}),
         });
         await onProfileUpdated(profile);
         ok(response, 200, { profile });

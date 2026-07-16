@@ -362,10 +362,14 @@ export function startServer(port = 8790, {
             rosterPlayer.name = profile.nickname;
             rosterPlayer.shortId = profile.shortId ?? rosterPlayer.shortId;
             rosterPlayer.emblem = profile.emblem ?? rosterPlayer.emblem;
+            rosterPlayer.avatarId = profile.avatarId ?? rosterPlayer.avatarId;
             rosterPlayer.pokerStats = profile.pokerStats ?? rosterPlayer.pokerStats;
           }
           const enginePlayer = game.engine?.players?.[seat];
-          if (enginePlayer) enginePlayer.playerName = profile.nickname;
+          if (enginePlayer) {
+            enginePlayer.playerName = profile.nickname;
+            enginePlayer.avatarId = profile.avatarId ?? enginePlayer.avatarId;
+          }
         }
       }
       if (notify) sendPlayerProfile(bound, profile, saved);
@@ -1403,6 +1407,7 @@ export function startServer(port = 8790, {
       const profile = playerStore.updateProfile(client.playerId, {
         ...(msg.nickname != null ? { nickname: msg.nickname } : {}),
         ...(msg.emblem != null ? { emblem: msg.emblem } : {}),
+        ...(msg.avatarId != null ? { avatarId: msg.avatarId } : {}),
       });
       publishProfileState(profile, { notify: true, saved: true });
 

@@ -1557,6 +1557,19 @@ body.h5-is-blocked #h5-stage {
   font-size: 10px;
 }
 
+.h5-lobby .h5-lobby-tools .h5-lobby-logout {
+  min-width: 68px;
+  color: #e7b2a4;
+  border-color: rgba(184, 74, 55, .3) !important;
+  background: linear-gradient(180deg, rgba(91, 35, 25, .34), rgba(34, 18, 14, .68));
+}
+
+.h5-lobby .h5-lobby-tools .h5-lobby-logout:active:not(:disabled) {
+  color: #ffe1d8;
+  border-color: rgba(220, 96, 72, .58) !important;
+  background: rgba(115, 43, 30, .46);
+}
+
 .h5-lobby .h5-team-list { gap: 8px; }
 .h5-lobby .h5-team-row {
   position: relative;
@@ -3693,8 +3706,94 @@ body.h5-is-blocked #h5-stage {
   font-weight: 800;
 }
 
+.h5-avatar-picker {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid rgba(231, 198, 106, .24);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 8% 20%, rgba(225, 184, 82, .14), transparent 42%),
+    rgba(25, 16, 10, .62);
+}
+
+.h5-avatar-picker__preview {
+  position: relative;
+  width: 60px;
+  aspect-ratio: 1;
+  padding: 3px;
+  border: 1px solid rgba(242, 205, 106, .72);
+  border-radius: 50%;
+  background: linear-gradient(145deg, #e9c96c, #5d3c17);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .35);
+}
+
+.h5-avatar-picker__preview img,
+.h5-avatar-option img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+.h5-avatar-picker__content { min-width: 0; }
+
+.h5-avatar-picker__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.h5-avatar-picker__heading strong {
+  color: #f3dfa8;
+  font-size: 10px;
+}
+
+.h5-avatar-picker__heading span {
+  overflow: hidden;
+  color: #9d9075;
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h5-avatar-picker__grid {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(26px, 1fr));
+  gap: 4px;
+}
+
+.h5-avatar-option {
+  position: relative;
+  min-width: 0;
+  aspect-ratio: 1;
+  padding: 2px !important;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, .12) !important;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .38);
+  opacity: .7;
+  transition: border-color .15s ease, box-shadow .15s ease, opacity .15s ease, transform .15s ease;
+}
+
+.h5-avatar-option:hover,
+.h5-avatar-option:focus-visible { opacity: 1; }
+
+.h5-avatar-option.is-selected {
+  border-color: #f2cd6a !important;
+  box-shadow: 0 0 0 2px rgba(242, 205, 106, .25), 0 0 12px rgba(242, 205, 106, .3);
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
 .h5-dialog:has(.h5-profile-form) {
-  max-height: min(92dvh, 680px);
+  box-sizing: border-box;
+  max-height: min(88cqh, 680px);
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -3738,9 +3837,11 @@ body.h5-is-blocked #h5-stage {
 }
 
 @media (max-height: 430px) {
-  .h5-dialog:has(.h5-profile-form) { max-height: 94dvh; }
+  .h5-dialog:has(.h5-profile-form) { max-height: 90cqh; }
   .h5-profile-credentials { padding: 7px; gap: 5px 7px; }
   .h5-profile-credentials .h5-field { height: 34px; }
+  .h5-avatar-picker { grid-template-columns: 52px minmax(0, 1fr); padding: 6px; }
+  .h5-avatar-picker__preview { width: 48px; }
 }
 
 .h5-field {
@@ -8703,6 +8804,7 @@ body.h5-is-blocked #h5-stage {
   .h5-lobby__eyebrow { font-size: 5px; letter-spacing: 1.5px; }
   .h5-lobby .h5-lobby-tools { gap: 3px; }
   .h5-lobby .h5-lobby-tools .h5-secondary-button { min-height: 30px; padding-inline: 7px; border-radius: 6px; font-size: 7px; }
+  .h5-lobby .h5-lobby-tools .h5-lobby-logout { min-width: 44px; }
   .h5-lobby .h5-team-list { gap: 5px; }
   .h5-lobby .h5-team-row {
     min-height: 58px;

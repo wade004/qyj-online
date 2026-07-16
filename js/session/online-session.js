@@ -653,7 +653,7 @@ export class OnlineSession {
         return;
       }
       const profileError = [
-        'INVALID_PROFILE', 'INVALID_NAME', 'INVALID_EMBLEM', 'INVALID_FIELD',
+        'INVALID_PROFILE', 'INVALID_NAME', 'INVALID_EMBLEM', 'INVALID_AVATAR', 'INVALID_FIELD',
         'PLAYER_NOT_IDENTIFIED', 'PLAYER_ALREADY_IDENTIFIED',
       ].includes(data.code);
       if (profileError) {
@@ -719,6 +719,7 @@ export class OnlineSession {
       activePlayer.playerId = this.playerProfile.playerId || activePlayer.playerId;
       activePlayer.shortId = this.playerProfile.shortId || activePlayer.shortId;
       activePlayer.emblem = this.playerProfile.emblem || activePlayer.emblem;
+      activePlayer.avatarId = this.playerProfile.avatarId || activePlayer.avatarId;
       activePlayer.pokerStats = this.playerProfile.pokerStats || activePlayer.pokerStats;
     }
     const currentData = this.state.data && typeof this.state.data === 'object'
@@ -988,12 +989,21 @@ export class OnlineSession {
         error: { code: 'INVALID_EMBLEM', message: '请选择有效纹章' },
       });
     }
+    const avatarId = Number(next.avatarId ?? this.playerProfile.avatarId);
+    if (!Number.isSafeInteger(avatarId) || avatarId < 1 || avatarId > 20) {
+      this.pushNotice('请选择有效头像', { kind: 'error', key: 'invalid-avatar' });
+      return Promise.resolve({
+        ok: false,
+        saved: false,
+        error: { code: 'INVALID_AVATAR', message: '请选择有效头像' },
+      });
+    }
     this.settleProfileUpdate({
       ok: false,
       saved: false,
       error: { code: 'SUPERSEDED', message: '已提交新的资料修改' },
     });
-    this.pendingPlayerProfile = { nickname: checked.nickname, emblem };
+    this.pendingPlayerProfile = { nickname: checked.nickname, emblem, avatarId };
     this.publish({ profileSync: 'saving', error: null });
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -1013,6 +1023,7 @@ export class OnlineSession {
         cmd: 'updateProfile',
         nickname: checked.nickname,
         emblem,
+        avatarId,
       });
       if (!sent) {
         this.pendingPlayerProfile = null;

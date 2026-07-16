@@ -49,6 +49,7 @@ export const ERROR_CODES = Object.freeze({
   SESSION_ALREADY_INITIALIZED: 'SESSION_ALREADY_INITIALIZED',
   INVALID_GUEST_ID: 'INVALID_GUEST_ID',
   INVALID_EMBLEM: 'INVALID_EMBLEM',
+  INVALID_AVATAR: 'INVALID_AVATAR',
   INVALID_PROFILE: 'INVALID_PROFILE',
   PLAYER_NOT_IDENTIFIED: 'PLAYER_NOT_IDENTIFIED',
   PLAYER_ALREADY_IDENTIFIED: 'PLAYER_ALREADY_IDENTIFIED',
@@ -104,6 +105,13 @@ function validateEmblem(value) {
   return null;
 }
 
+function validateAvatarId(value) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 20) {
+    return failure(ERROR_CODES.INVALID_AVATAR, '头像不存在');
+  }
+  return null;
+}
+
 function validateFields(msg) {
   if (msg.protocolVersion != null
     && (!Number.isSafeInteger(msg.protocolVersion)
@@ -149,7 +157,8 @@ function validateFields(msg) {
     case 'updateProfile': {
       const hasNickname = Object.hasOwn(msg, 'nickname') && msg.nickname != null;
       const hasEmblem = Object.hasOwn(msg, 'emblem') && msg.emblem != null;
-      if (!hasNickname && !hasEmblem) {
+      const hasAvatarId = Object.hasOwn(msg, 'avatarId') && msg.avatarId != null;
+      if (!hasNickname && !hasEmblem && !hasAvatarId) {
         return failure(ERROR_CODES.INVALID_PROFILE, '至少提供一个资料字段');
       }
       if (hasNickname) {
@@ -159,6 +168,10 @@ function validateFields(msg) {
       if (hasEmblem) {
         const invalidEmblem = validateEmblem(msg.emblem);
         if (invalidEmblem) return invalidEmblem;
+      }
+      if (hasAvatarId) {
+        const invalidAvatarId = validateAvatarId(msg.avatarId);
+        if (invalidAvatarId) return invalidAvatarId;
       }
       break;
     }

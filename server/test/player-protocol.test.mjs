@@ -155,13 +155,14 @@ test('登录会话/updateProfile/rename 使用统一 playerProfile 契约并跨�
       );
       assert.equal(lobby.a.player.playerId, initialProfile.playerId);
 
-      owner.send({ cmd: 'updateProfile', nickname: '月下客', emblem: '月' });
+      owner.send({ cmd: 'updateProfile', nickname: '月下客', emblem: '月', avatarId: 14 });
       const updated = await owner.waitFor(
         (message) => message.ev === 'playerProfile' && message.a.saved === true,
         '资料保存',
       );
       assert.equal(updated.a.profile.nickname, '月下客');
       assert.equal(updated.a.profile.emblem, '月');
+      assert.equal(updated.a.profile.avatarId, 14);
 
       owner.send({ cmd: 'rename', name: '墨客' });
       const renamed = await owner.waitFor(
@@ -273,6 +274,10 @@ test('玩家协议拒绝非法身份字段、未登录更新及登录连接内�
       [
         { cmd: 'updateProfile' },
         ERROR_CODES.INVALID_PROFILE,
+      ],
+      [
+        { cmd: 'updateProfile', avatarId: 99 },
+        ERROR_CODES.INVALID_AVATAR,
       ],
     ];
     for (const [payload, code] of cases) {

@@ -274,14 +274,15 @@ fakeClient.message({ ev: 'lobby', a: { yourName: '契约玩家', teams: [] } });
 assert(online.getState().screen === 'lobby', '大厅状态');
 assert(online.createTeam(9) && fakeClient.sent.at(-1)?.tableSize === 9,
   '创建 9 人桌命令透传 tableSize');
-const profileSave = online.updatePlayerProfile({ nickname: '新契约名', emblem: '月' });
+const profileSave = online.updatePlayerProfile({ nickname: '新契约名', emblem: '月', avatarId: 16 });
 assert(fakeClient.sent.at(-1)?.cmd === 'updateProfile', '玩家资料更新走服务端命令');
+assert(fakeClient.sent.at(-1)?.avatarId === 16, '玩家头像通过资料更新命令保存');
 fakeClient.message({
   ev: 'playerProfile',
   a: {
     saved: true,
     profile: {
-      playerId: 'QYJ-CONTRACT', shortId: 'C0DE', nickname: '新契约名', emblem: '月',
+      playerId: 'QYJ-CONTRACT', shortId: 'C0DE', nickname: '新契约名', emblem: '月', avatarId: 16,
       stats: { matches: 5, wins: 2, top3: 4, bestRank: 1, winRate: 40 },
       recentMatches: [],
       pokerStats: samplePokerStats,
@@ -291,6 +292,7 @@ fakeClient.message({
 const profileSaveResult = await profileSave;
 assert(profileSaveResult.ok && profileSaveResult.saved
   && online.getState().player.nickname === '新契约名'
+  && online.getState().player.avatarId === 16
   && online.getState().notice?.message === '玩家资料已保存', '资料保存回执刷新玩家状态与提示');
 const rejectedProfileSave = online.updatePlayerProfile({ nickname: '待拒绝名', emblem: '侠' });
 fakeClient.message({

@@ -279,6 +279,13 @@ export function normalizeEmblem(value) {
   return value;
 }
 
+export function normalizeAvatarId(value) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 20) {
+    validationError('INVALID_AVATAR', '头像不存在');
+  }
+  return value;
+}
+
 export function guestFingerprint(guestId) {
   return createHash('sha256').update(normalizeGuestId(guestId), 'utf8').digest('hex');
 }
@@ -1098,7 +1105,9 @@ export class PlayerStore {
     );
     this.updatePlayer = this.db.prepare(`
       UPDATE players
-      SET nickname = COALESCE(?, nickname), emblem = COALESCE(?, emblem)
+      SET nickname = COALESCE(?, nickname),
+          emblem = COALESCE(?, emblem),
+          avatar_id = COALESCE(?, avatar_id)
       WHERE player_id = ?
     `);
     this.recentMatches = this.db.prepare(`
@@ -1387,12 +1396,14 @@ export class PlayerStore {
     }
     const hasNickname = Object.hasOwn(patch, 'nickname') && patch.nickname != null;
     const hasEmblem = Object.hasOwn(patch, 'emblem') && patch.emblem != null;
-    if (!hasNickname && !hasEmblem) {
+    const hasAvatarId = Object.hasOwn(patch, 'avatarId') && patch.avatarId != null;
+    if (!hasNickname && !hasEmblem && !hasAvatarId) {
       validationError('INVALID_PROFILE', '至少提供一个资料字段');
     }
     const nickname = hasNickname ? normalizeNickname(patch.nickname) : null;
     const emblem = hasEmblem ? normalizeEmblem(patch.emblem) : null;
-    const result = this.updatePlayer.run(nickname, emblem, playerId);
+    const avatarId = hasAvatarId ? normalizeAvatarId(patch.avatarId) : null;
+    const result = this.updatePlayer.run(nickname, emblem, avatarId, playerId);
     if (result.changes !== 1) {
       validationError('PLAYER_NOT_IDENTIFIED', '玩家资料不存在');
     }
@@ -1475,7 +1486,7 @@ export class PlayerStore {
         claimedGuest = true;
         if (guestPlayer.nickname === DEFAULT_PLAYER_NICKNAME
           && initialNickname !== DEFAULT_PLAYER_NICKNAME) {
-          this.updatePlayer.run(initialNickname, null, playerId);
+          this.updatePlayer.run(initialNickname, null, null, playerId);
         }
         this.touchPlayer.run(now, playerId);
       } else {
