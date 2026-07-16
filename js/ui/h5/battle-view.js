@@ -740,12 +740,14 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
   const chatInput = element('input', {
     className: 'h5-chat-input',
     attrs: {
-      type: 'text', maxlength: 80, placeholder: '和同桌玩家交流…',
+      type: 'text', maxlength: 80, placeholder: '输入消息…', autocomplete: 'off',
+      enterkeyhint: 'send',
       'aria-label': '聊天内容', 'data-testid': 'h5-chat-input',
     },
   });
   const chatSend = button('发送', {
-    className: 'h5-chat-send', attrs: { 'data-testid': 'h5-chat-send' },
+    className: 'h5-chat-send',
+    attrs: { type: 'submit', disabled: true, 'data-testid': 'h5-chat-send' },
   });
   const chatTab = button('聊天', {
     className: 'h5-dock-tabs__tab is-active',
@@ -758,7 +760,10 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
   const chatPanel = element('section', {
     className: 'h5-dock-panel is-active',
     attrs: { role: 'tabpanel', 'data-panel': 'chat', 'data-testid': 'h5-chat-panel' },
-  }, [chatList, element('div', { className: 'h5-chat-compose' }, [chatInput, chatSend])]);
+  }, [chatList, element('form', {
+    className: 'h5-chat-compose',
+    attrs: { 'aria-label': '发送聊天消息' },
+  }, [chatInput, chatSend])]);
   const reportPanel = element('section', {
     className: 'h5-dock-panel',
     attrs: { role: 'tabpanel', 'data-panel': 'report', hidden: true, 'data-testid': 'h5-report-panel' },
@@ -836,6 +841,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
     const text = chatInput.value.trim();
     if (!text || !engine.sendChat?.(text)) return;
     chatInput.value = '';
+    chatSend.disabled = true;
   }
 
   function rememberSeatAction(idx, key, amount = 0) {
@@ -1077,10 +1083,12 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
   chatTab.addEventListener('click', () => selectDockTab('chat'));
   reportTab.addEventListener('click', () => selectDockTab('report'));
   logButton.addEventListener('click', () => selectDockTab('report'));
-  chatSend.addEventListener('click', submitChat);
-  chatInput.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' || event.isComposing) return;
+  chatInput.addEventListener('input', () => {
+    chatSend.disabled = !chatInput.value.trim();
+  });
+  chatInput.closest('form')?.addEventListener('submit', (event) => {
     event.preventDefault();
+    if (event.isComposing) return;
     submitChat();
   });
 

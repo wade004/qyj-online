@@ -180,6 +180,7 @@ export function createAccountClient({
   return Object.freeze({
     apiOrigin: origin,
     getSession: () => request('/api/auth/me'),
+    deviceLogin: (payload = {}) => request('/api/auth/device', { method: 'POST', body: payload }),
     register: (payload) => request('/api/auth/register', { method: 'POST', body: payload }),
     login: (payload, password) => request('/api/auth/login', {
       method: 'POST',
@@ -187,6 +188,10 @@ export function createAccountClient({
     }),
     logout: () => request('/api/auth/logout', { method: 'POST' }),
     updateProfile: (payload) => request('/api/player/me', { method: 'PATCH', body: payload }),
+    updateCredentials: (payload) => request('/api/player/me/credentials', {
+      method: 'PATCH',
+      body: payload,
+    }),
     getHandHistory: ({ limit = 20, cursor = null } = {}) => {
       const query = new URLSearchParams({ limit: String(limit) });
       if (cursor != null && cursor !== '') query.set('cursor', String(cursor));

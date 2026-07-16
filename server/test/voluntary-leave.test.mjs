@@ -122,6 +122,22 @@ test('voluntary leave enables immediate default actions and allows new rooms plu
     );
     assert.equal(resumed.a.mySeat, 1);
     await a.waitFor((message) => message.ev === 'sync', 'old game state sync');
+    const ready = await a.waitFor((message) => message.ev === 'resumeReady', 'old game recovery ready');
+    assert.deepEqual(ready.a, { teamId: room.a.id, seat: 1 });
+
+    // A UI refresh can request the lobby after the server has already rebound
+    // the seat. The running game must remain discoverable and rejoin idempotent.
+    a.send({ cmd: 'lobby' });
+    const refreshedLobby = await a.waitFor((message) => message.ev === 'lobby'
+      && message.a.activeGames?.some((game) => game.id === room.a.id), 'attached game lobby refresh');
+    const attachedGame = refreshedLobby.a.activeGames.find((game) => game.id === room.a.id);
+    assert.equal(attachedGame.managed, false);
+    assert.equal(attachedGame.attached, true);
+    a.send({ cmd: 'rejoinGame', teamId: room.a.id });
+    await a.waitFor((message) => message.ev === 'gameStart' && message.a.mySeat === 1,
+      'idempotent attached game rejoin');
+    await a.waitFor((message) => message.ev === 'sync', 'idempotent attached game sync');
+    await a.waitFor((message) => message.ev === 'resumeReady', 'idempotent attached game ready');
     b.ws.off('message', autoB);
   } finally {
     await Promise.all(sockets.map((ws) => close(ws).catch(() => {})));

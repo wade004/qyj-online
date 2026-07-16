@@ -1,6 +1,7 @@
 const STORAGE_KEY = 'qyj-player-profile-v2';
 const LEGACY_STORAGE_KEY = 'qyj-guest-profile-v1';
 const EMBLEMS = ['侠', '群', '墨', '月'];
+const AVATAR_COUNT = 20;
 export const DEFAULT_PLAYER_NICKNAME = '无名侠客';
 
 function fallbackId() {
@@ -23,6 +24,15 @@ function localShortId(id) {
     hash = Math.imul(hash, 16777619);
   }
   return Math.abs(hash >>> 0).toString(16).slice(-4).padStart(4, '0').toUpperCase();
+}
+
+function localAvatarId(id) {
+  let hash = 2166136261;
+  for (const ch of String(id || '')) {
+    hash ^= ch.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return 1 + ((hash >>> 0) % AVATAR_COUNT);
 }
 
 function finiteInt(value, fallback = 0) {
@@ -93,12 +103,15 @@ function normalize(raw = {}) {
   const emblem = EMBLEMS.includes(raw.emblem) ? raw.emblem : EMBLEMS[0];
   const playerId = raw.playerId == null ? '' : String(raw.playerId);
   const serverShortId = typeof raw.shortId === 'string' ? raw.shortId.trim() : '';
+  const avatarValue = Number(raw.avatarId);
   return {
     guestId,
     playerId,
     shortId: serverShortId || localShortId(guestId),
     nickname,
     emblem,
+    avatarId: Number.isInteger(avatarValue) && avatarValue >= 1 && avatarValue <= AVATAR_COUNT
+      ? avatarValue : localAvatarId(playerId || guestId),
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
     lastSeenAt: typeof raw.lastSeenAt === 'string' ? raw.lastSeenAt : '',
     stats: normalizeStats(raw.stats),

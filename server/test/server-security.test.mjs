@@ -137,6 +137,76 @@ test('旧客户端看不到且不能加入 9 人桌，但无 tableSize 的 creat
   }
 });
 
+test('房间与选将聊天实时广播，选将状态公开且确认英雄后服务端锁定', async () => {
+  const { server, port } = await openServer({ heartbeatMs: 0 });
+  const owner = await openClient(server, port);
+  const member = await openClient(server, port);
+  try {
+    const created = waitForMessage(owner, (msg) => msg.ev === 'team', '创建聊天房间');
+    owner.send(JSON.stringify({ cmd: 'create' }));
+    const room = await created;
+    const joined = waitForMessage(member, (msg) => msg.ev === 'team', '加入聊天房间');
+    member.send(JSON.stringify({ cmd: 'join', teamId: room.a.id }));
+    const joinedRoom = await joined;
+    assert.equal(joinedRoom.a.members.length, 2);
+    assert.ok(joinedRoom.a.members.every((row) => row.avatarId >= 1 && row.avatarId <= 20));
+
+    const ownerChat = waitForMessage(owner, (msg) => msg.ev === 'chat', '房主收到聊天');
+    const memberChat = waitForMessage(member, (msg) => msg.ev === 'chat', '成员收到聊天');
+    member.send(JSON.stringify({ cmd: 'chat', text: '  同桌好  ' }));
+    const [first, second] = await Promise.all([ownerChat, memberChat]);
+    assert.equal(first.a.text, '同桌好');
+    assert.equal(first.a.id, second.a.id);
+    assert.ok(first.a.avatarId >= 1 && first.a.avatarId <= 20);
+
+    const refreshed = waitForMessage(owner, (msg) => msg.ev === 'team', '聊天历史随房间状态返回');
+    owner.send(JSON.stringify({ cmd: 'rename', name: '聊天雅间' }));
+    const state = await refreshed;
+    assert.equal(state.a.chatMessages.at(-1).id, first.a.id);
+    assert.equal(state.a.chatMessages.at(-1).text, '同桌好');
+
+    const ownerDraft = waitForMessage(owner, (msg) => msg.ev === 'pick', '进入选将');
+    const memberDraft = waitForMessage(member, (msg) => msg.ev === 'pick', '队员进入选将');
+    owner.send(JSON.stringify({ cmd: 'startPick' }));
+    const [ownerPick, memberPick] = await Promise.all([ownerDraft, memberDraft]);
+    assert.equal(ownerPick.a.members.length, 2);
+    assert.equal(ownerPick.a.members.every((row) => row.ready === false && row.heroId === null), true);
+    assert.equal(ownerPick.a.chatMessages.at(-1).text, '同桌好');
+    assert.equal(memberPick.a.members.some((row) => row.isYou), true);
+
+    const pickChatOwner = waitForMessage(owner, (msg) => msg.ev === 'chat', '选将聊天房主接收');
+    const pickChatMember = waitForMessage(member, (msg) => msg.ev === 'chat', '选将聊天队员接收');
+    member.send(JSON.stringify({ cmd: 'chat', text: '我选貂蝉' }));
+    await Promise.all([pickChatOwner, pickChatMember]);
+
+    const ownerLocked = waitForMessage(
+      owner,
+      (msg) => msg.ev === 'pick' && msg.a.members.some((row) => row.isYou && row.heroId === 'zhugeliang'),
+      '房主锁定诸葛亮',
+    );
+    owner.send(JSON.stringify({ cmd: 'pick', heroId: 'zhugeliang' }));
+    const lockedState = await ownerLocked;
+    assert.equal(lockedState.a.members.find((row) => row.isYou).ready, true);
+    assert.equal(lockedState.a.chatMessages.at(-1).text, '我选貂蝉');
+
+    await expectError(
+      owner,
+      JSON.stringify({ cmd: 'pick', heroId: 'hanxin' }),
+      ERROR_CODES.HERO_ALREADY_LOCKED,
+    );
+
+    const allPicked = waitForMessage(owner, (msg) => msg.ev === 'pick' && msg.a.allPicked, '全员锁定');
+    member.send(JSON.stringify({ cmd: 'pick', heroId: 'diaochan' }));
+    const readyState = await allPicked;
+    assert.deepEqual(
+      readyState.a.members.map((row) => row.heroId).sort(),
+      ['diaochan', 'zhugeliang'],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test('9 人桌真人容量为 9，第 10 名真人被拒绝', async () => {
   const { server, port } = await openServer({ heartbeatMs: 0 });
   const sockets = [];

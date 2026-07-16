@@ -1,6 +1,6 @@
 import { button, clear, element } from '../shared/dom.js';
 
-const AUTH_VIEWS = new Set(['login', 'register', 'reset-request', 'reset-confirm']);
+const AUTH_VIEWS = new Set(['quick', 'login', 'register', 'reset-request', 'reset-confirm']);
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 
 function textMessage(value) {
@@ -29,7 +29,7 @@ function authViewFor(state = {}) {
   if (raw.includes('register')) return 'register';
   if (raw.includes('reset-confirm') || raw.includes('new-password')) return 'reset-confirm';
   if (raw.includes('reset') || raw.includes('forgot')) return 'reset-request';
-  return 'login';
+  return 'quick';
 }
 
 function resultFailure(result, fallback) {
@@ -161,6 +161,67 @@ function authLink(label, testId, session, view) {
     attrs: { 'data-testid': testId },
     on: { click: () => selectView(session, view) },
   });
+}
+
+function quickLoginForm({ state, session, feedback }) {
+  const data = stateData(state);
+  const nickname = inputField({
+    label: '玩家昵称',
+    testId: 'h5-quick-nickname',
+    value: data.nickname || '',
+    autocomplete: 'nickname',
+    minlength: 1,
+    maxlength: 8,
+    placeholder: '输入昵称即可开始',
+  });
+  const submit = button('一键登录并进入联机', {
+    className: 'h5-primary-button h5-auth__submit',
+    attrs: { type: 'submit', 'data-testid': 'h5-quick-submit' },
+  });
+  const form = element('form', {
+    className: 'h5-auth__form h5-auth__form--quick',
+    attrs: { 'data-testid': 'h5-auth-quick', novalidate: true },
+  }, [
+    element('p', {
+      className: 'h5-auth__hint',
+      text: '首次只需填写昵称。本浏览器会保存安全设备凭证，下次进入将自动登录。',
+    }),
+    nickname.node,
+    feedback.error,
+    feedback.status,
+    submit,
+    element('p', {
+      className: 'h5-auth__device-note',
+      text: '清除浏览器数据或更换设备后，需要使用已设置的邮箱和密码登录。',
+    }),
+    element('div', { className: 'h5-auth__links' }, [
+      authLink('账号密码登录', 'h5-auth-to-login', session, 'login'),
+      authLink('注册完整账号', 'h5-auth-to-register', session, 'register'),
+    ]),
+  ]);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const value = nickname.input.value.trim().normalize('NFC');
+    if ([...value].length < 1 || [...value].length > 8
+      || /[<>\p{Cc}\p{Cs}\u202A-\u202E\u2066-\u2069]/u.test(value)) {
+      setFeedback(feedback.error, '昵称需为 1–8 个可用字符');
+      nickname.input.focus();
+      return;
+    }
+    await runSessionAction({
+      form,
+      submit,
+      session,
+      method: 'quickLogin',
+      payload: { nickname: value },
+      feedback,
+      idleText: '一键登录并进入联机',
+      busyText: '正在建立设备账号…',
+      successText: '登录成功，正在进入大厅…',
+      failureText: '设备快捷登录失败，请稍后重试',
+    });
+  });
+  return { form, focus: nickname.input };
 }
 
 function loginForm({ state, session, feedback }) {
@@ -462,6 +523,7 @@ function resetConfirmForm({ state, session, feedback }) {
 }
 
 const VIEW_META = Object.freeze({
+  quick: { eyebrow: 'DEVICE QUICK LOGIN', title: '一键登录', description: '本设备只需昵称' },
   login: { eyebrow: 'ONLINE ACCOUNT', title: '登录联机账号', description: '用户名和邮箱均可登录' },
   register: { eyebrow: 'CREATE ACCOUNT', title: '注册账号', description: '用户名 · 密码 · 邮箱' },
   'reset-request': { eyebrow: 'ACCOUNT RECOVERY', title: '找回密码', description: '通过注册邮箱重置' },
@@ -473,6 +535,7 @@ export function createH5AuthView({ state = {}, session = null, onBack = null } =
   const meta = VIEW_META[view];
   const feedback = feedbackNodes(state);
   const builder = ({
+    quick: quickLoginForm,
     login: loginForm,
     register: registerForm,
     'reset-request': resetRequestForm,

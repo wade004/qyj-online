@@ -238,6 +238,96 @@ async function settlementOverlaySnapshot(page) {
   });
 }
 
+test('联机房间：6/9 人横屏座位不重叠、默认头像可用且房间聊天可发送', async ({ browser }) => {
+  for (const sample of [
+    { tableSize: 6, viewport: { width: 844, height: 390 } },
+    { tableSize: 9, viewport: { width: 932, height: 430 } },
+  ]) {
+    const user = await createUser(browser, sample.viewport);
+    try {
+      await enterApp(user.page);
+      await register(user.page, account(`room_${sample.tableSize}`));
+      await createRoom(user.page, sample.tableSize);
+
+      const avatar = user.page.locator('.h5-room-seat__avatar').first();
+      await expect(avatar).toBeVisible();
+      await expect.poll(() => avatar.evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
+
+      const message = `${sample.tableSize}人桌房间聊天验收`;
+      await user.page.getByTestId('h5-room-chat-input').fill(message);
+      await user.page.getByTestId('h5-room-chat-send').click();
+      await expect(user.page.getByTestId('h5-room-chat-messages')).toContainText(message);
+
+      const layout = await user.page.evaluate(() => {
+        const rect = (node) => {
+          const value = node.getBoundingClientRect();
+          return { left: value.left, top: value.top, right: value.right, bottom: value.bottom };
+        };
+        const intersects = (a, b) => (
+          Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left))
+          * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top))
+        );
+        const seats = [...document.querySelectorAll('.h5-room-seat')].map(rect);
+        const overlaps = [];
+        seats.forEach((seat, index) => seats.slice(index + 1).forEach((other, offset) => {
+          if (intersects(seat, other) > 1) overlaps.push([index, index + offset + 1]);
+        }));
+        const chat = rect(document.querySelector('.h5-room-chat'));
+        const composer = rect(document.querySelector('.h5-room-chat__composer'));
+        return {
+          overlaps,
+          composerInsideChat: composer.left >= chat.left && composer.right <= chat.right
+            && composer.top >= chat.top && composer.bottom <= chat.bottom,
+          fitsViewport: document.documentElement.scrollWidth <= window.innerWidth + 1
+            && document.documentElement.scrollHeight <= window.innerHeight + 1,
+        };
+      });
+      expect(layout.overlaps).toEqual([]);
+      expect(layout.composerInsideChat).toBe(true);
+      expect(layout.fitsViewport).toBe(true);
+
+      await user.page.getByTestId('h5-start-pick').click();
+      await expect(user.page.getByTestId('h5-online-pick')).toBeVisible();
+      await expect(user.page.getByTestId('h5-pick-player')).toHaveCount(1);
+      await expect(user.page.getByTestId('h5-pick-player')).toHaveAttribute('data-ready', 'false');
+
+      const pickMessage = `${sample.tableSize}人桌选将聊天验收`;
+      await user.page.getByTestId('h5-pick-chat-input').fill(pickMessage);
+      await user.page.getByTestId('h5-pick-chat-send').click();
+      await expect(user.page.getByTestId('h5-pick-chat-messages')).toContainText(pickMessage);
+
+      const draftLayout = await user.page.evaluate(() => {
+        const nodes = [...document.querySelectorAll('.h5-pick-roster, .h5-pick-select, .h5-pick-chat')];
+        const boxes = nodes.map((node) => node.getBoundingClientRect());
+        const overlap = boxes.some((a, index) => boxes.slice(index + 1).some((b) => (
+          Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left))
+          * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)) > 1
+        )));
+        return {
+          columns: boxes.length,
+          overlap,
+          fitsViewport: document.documentElement.scrollWidth <= window.innerWidth + 1
+            && document.documentElement.scrollHeight <= window.innerHeight + 1,
+        };
+      });
+      expect(draftLayout).toEqual({ columns: 3, overlap: false, fitsViewport: true });
+
+      await user.page.getByTestId('h5-hero-zhugeliang').click();
+      await user.page.getByTestId('h5-confirm-hero').click();
+      await expect(user.page.getByTestId('h5-pick-locked')).toBeVisible();
+      await expect(user.page.getByTestId('h5-pick-locked')).toContainText('诸葛亮');
+      await expect(user.page.getByTestId('h5-pick-locked')).toContainText('本局不可更换');
+      await expect(user.page.getByTestId('h5-pick-select')).toHaveCount(0);
+      await expect(user.page.getByTestId('h5-confirm-hero')).toHaveCount(0);
+      await expect(user.page.getByTestId('h5-pick-player')).toHaveAttribute('data-ready', 'true');
+      await expect(user.page.getByTestId('h5-start-game')).toBeEnabled();
+      expect(user.errors).toEqual([]);
+    } finally {
+      await user.context.close();
+    }
+  }
+});
+
 function collectFrames(page) {
   const frames = [];
   page.on('websocket', (socket) => {
@@ -264,6 +354,7 @@ test('唯一入口：根地址只加载 H5 联网版，竖屏受阻且 PC/旧 H5
     await user.page.setViewportSize({ width: 844, height: 390 });
     await user.page.getByTestId('h5-enter-landscape').click();
     await expect(user.page.getByTestId('h5-auth')).toBeVisible({ timeout: 10_000 });
+    await user.page.getByTestId('h5-auth-to-login').click();
     await expect(user.page.getByTestId('h5-auth-identifier')).toHaveCSS('font-size', '16px');
     await user.page.getByTestId('h5-auth-identifier').focus();
     await expect(user.page.locator('#h5-orientation-gate')).toBeHidden();
@@ -279,6 +370,58 @@ test('唯一入口：根地址只加载 H5 联网版，竖屏受阻且 PC/旧 H5
   }
 });
 
+test('手机横屏账号表单：常见尺寸触控高度充足且输入框不越界、不重叠', async ({ browser }) => {
+  for (const viewport of [
+    { width: 932, height: 430 },
+    { width: 844, height: 390 },
+    { width: 740, height: 360 },
+  ]) {
+    const user = await createUser(browser, viewport);
+    try {
+      await enterApp(user.page);
+      await user.page.getByTestId('h5-auth-to-register').click();
+      const layout = await user.page.evaluate(() => {
+        const rect = (node) => {
+          const value = node.getBoundingClientRect();
+          return {
+            left: value.left, top: value.top, right: value.right, bottom: value.bottom,
+            width: value.width, height: value.height,
+          };
+        };
+        const overlap = (a, b) => (
+          Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left))
+          * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top))
+        );
+        const fields = [...document.querySelectorAll('.h5-auth__field')].map(rect);
+        const inputs = [...document.querySelectorAll('.h5-auth__input')].map(rect);
+        const panel = rect(document.querySelector('.h5-auth__panel'));
+        const submit = rect(document.querySelector('.h5-auth__submit'));
+        return {
+          fields,
+          inputs,
+          panel,
+          submit,
+          overlaps: inputs.flatMap((item, index) => inputs.slice(index + 1)
+            .map((other) => overlap(item, other))).filter((area) => area > 1),
+        };
+      });
+      expect(layout.inputs).toHaveLength(4);
+      expect(layout.overlaps).toEqual([]);
+      expect(layout.inputs.every((input) => input.height >= 42)).toBe(true);
+      expect(layout.inputs.every((input, index) => (
+        input.left >= layout.fields[index].left - 1
+        && input.right <= layout.fields[index].right + 1
+      ))).toBe(true);
+      expect(layout.submit.height).toBeGreaterThanOrEqual(42);
+      expect(layout.panel.left).toBeGreaterThanOrEqual(0);
+      expect(layout.panel.right).toBeLessThanOrEqual(viewport.width + 1);
+      expect(user.errors).toEqual([]);
+    } finally {
+      await user.context.close();
+    }
+  }
+});
+
 test('H5 账号闭环：注册、退出并使用邮箱重新登录', async ({ browser }) => {
   const user = await createUser(browser);
   const value = account('account');
@@ -291,6 +434,8 @@ test('H5 账号闭环：注册、退出并使用邮箱重新登录', async ({ br
     await expect(user.page.getByTestId('h5-account-username')).toHaveText(value.username);
     await expect(user.page.getByTestId('h5-account-email')).toHaveText(value.email);
     await user.page.getByTestId('h5-account-logout').click();
+    await expect(user.page.getByTestId('h5-auth-quick')).toBeVisible({ timeout: 15_000 });
+    await user.page.getByTestId('h5-auth-to-login').click();
     await expect(user.page.getByTestId('h5-auth-login')).toBeVisible({ timeout: 15_000 });
 
     await user.page.getByTestId('h5-auth-identifier').fill(value.email);
@@ -300,6 +445,51 @@ test('H5 账号闭环：注册、退出并使用邮箱重新登录', async ({ br
     expect(user.errors).toEqual([]);
   } finally {
     await user.context.close();
+  }
+});
+
+test('设备一键登录：首次只填昵称、同设备自动进入、补全邮箱密码后可跨设备登录', async ({ browser }) => {
+  const first = await createUser(browser);
+  const nickname = `一键侠${sequence++}`;
+  const email = `quick_${RUN_ID}_${sequence}@example.com`;
+  try {
+    await enterApp(first.page);
+    await expect(first.page.getByTestId('h5-auth-quick')).toBeVisible();
+    await first.page.getByTestId('h5-quick-nickname').fill(nickname);
+    await first.page.getByTestId('h5-quick-submit').click();
+    await expect(first.page.getByTestId('h5-online-lobby')).toBeVisible({ timeout: 15_000 });
+    await expect(first.page.getByTestId('h5-player-id')).toContainText(nickname);
+
+    const firstPlayerId = await first.page.getByTestId('h5-player-id').textContent();
+    await first.context.clearCookies({ name: 'qyj_session' });
+    await first.page.goto('/');
+    await first.page.getByTestId('h5-enter-landscape').click();
+    await expect(first.page.getByTestId('h5-online-lobby')).toBeVisible({ timeout: 15_000 });
+    await expect(first.page.getByTestId('h5-player-id')).toHaveText(firstPlayerId || '');
+
+    await first.page.getByTestId('h5-profile-edit').click();
+    await first.page.getByTestId('h5-profile-email').fill(email);
+    await first.page.getByTestId('h5-profile-new-password').fill(PASSWORD);
+    await first.page.getByTestId('h5-profile-confirm-password').fill(PASSWORD);
+    await first.page.getByTestId('h5-profile-save').click();
+    await expect(first.page.getByTestId('h5-profile-save')).toHaveCount(0);
+
+    const second = await createUser(browser);
+    try {
+      await enterApp(second.page);
+      await second.page.getByTestId('h5-auth-to-login').click();
+      await second.page.getByTestId('h5-auth-identifier').fill(email);
+      await second.page.getByTestId('h5-auth-password').fill(PASSWORD);
+      await second.page.getByTestId('h5-auth-submit').click();
+      await expect(second.page.getByTestId('h5-online-lobby')).toBeVisible({ timeout: 15_000 });
+      await expect(second.page.getByTestId('h5-player-id')).toHaveText(firstPlayerId || '');
+      expect(second.errors).toEqual([]);
+    } finally {
+      await second.context.close();
+    }
+    expect(first.errors).toEqual([]);
+  } finally {
+    await first.context.close();
   }
 });
 
@@ -429,10 +619,39 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
     await expect(user.page.getByTestId('h5-chat-report')).toBeVisible();
     await expect(user.page.getByTestId('h5-chat-panel')).toBeVisible();
 
+    const chatLayout = await user.page.evaluate(() => {
+      const rect = (node) => {
+        const value = node.getBoundingClientRect();
+        return {
+          left: value.left, right: value.right, top: value.top, bottom: value.bottom,
+          width: value.width, height: value.height,
+        };
+      };
+      const input = document.querySelector('.h5-chat-input');
+      const send = document.querySelector('.h5-chat-send');
+      const compose = document.querySelector('.h5-chat-compose');
+      return {
+        input: rect(input),
+        send: rect(send),
+        compose: rect(compose),
+        inputFontSize: Number.parseFloat(getComputedStyle(input).fontSize),
+        placeholderFontSize: Number.parseFloat(getComputedStyle(input, '::placeholder').fontSize),
+      };
+    });
+    expect(chatLayout.input.right).toBeLessThanOrEqual(chatLayout.send.left - 1);
+    expect(chatLayout.send.right).toBeLessThanOrEqual(chatLayout.compose.right + 1);
+    expect(chatLayout.input.left).toBeGreaterThanOrEqual(chatLayout.compose.left - 1);
+    expect(chatLayout.send.height).toBeGreaterThanOrEqual(23);
+    expect(chatLayout.inputFontSize).toBeGreaterThanOrEqual(16);
+    expect(chatLayout.placeholderFontSize).toBeLessThanOrEqual(8);
+    await expect(user.page.getByTestId('h5-chat-send')).toBeDisabled();
+
     const chatText = `布局验收_${RUN_ID}`;
     await user.page.getByTestId('h5-chat-input').fill(chatText);
+    await expect(user.page.getByTestId('h5-chat-send')).toBeEnabled();
     await user.page.getByTestId('h5-chat-send').click();
     await expect(user.page.getByTestId('h5-chat-list')).toContainText(chatText);
+    await expect(user.page.getByTestId('h5-chat-send')).toBeDisabled();
     await user.page.getByTestId('h5-report-tab').click();
     await expect(user.page.getByTestId('h5-report-panel')).toBeVisible();
     await expect(user.page.getByTestId('h5-chat-panel')).toBeHidden();
@@ -653,9 +872,11 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
     await expect(user.page.locator('.h5-dialog')).toContainText('立即执行默认操作');
     await user.page.getByTestId('h5-dialog-confirm').click();
     await expect(user.page.getByTestId('h5-online-lobby')).toBeVisible({ timeout: 15_000 });
-    await expect(user.page.getByTestId('h5-active-games')).toContainText('托管中的牌局');
+    await expect(user.page.getByTestId('h5-active-games')).toContainText('续接牌局');
     await user.page.locator('[data-testid^="h5-rejoin-game-"]').click();
     await expect(user.page.getByTestId('h5-battle')).toBeVisible({ timeout: 15_000 });
+    await expect(user.page.getByTestId('h5-reconnect-overlay')).toHaveCount(0, { timeout: 6_000 });
+    await expect(user.page.locator('.h5-action-area')).toBeVisible();
     expect(user.errors).toEqual([]);
   } finally {
     await user.context.close();

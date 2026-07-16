@@ -7,7 +7,18 @@ import { createHandHistoryPanel } from '../shared/hand-history.js';
 import { createH5AuthView } from './auth-view.js';
 import { mountH5Battle } from './battle-view.js';
 
-const PHASE_LABELS = Object.freeze({ lobby: '待命', picking: '选将中', game: '对局中', battle: '对局中' });
+const PHASE_LABELS = Object.freeze({ lobby: '等待入席', picking: '选将中', playing: '牌局中', game: '牌局中', battle: '牌局中' });
+
+function playerAvatarUrl(value) {
+  const number = Number(value);
+  const avatarId = Number.isInteger(number) && number >= 1 && number <= 20 ? number : 1;
+  return `./assets/avatars/default/avatar-${String(avatarId).padStart(2, '0')}.webp`;
+}
+
+function roomMessageTime(value) {
+  const date = new Date(Number(value) || Date.now());
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
 
 function onlineTableSize(value) {
   const size = Number(value?.tableSize || value?.totalPlayers || value?.maxMembers);
@@ -573,11 +584,42 @@ export function mountH5App({ root }) {
 
   function openH5Profile() {
     const account = onlineState?.account || {};
-    const username = String(account.username || '—');
-    const email = String(account.email || '—');
+    const credentialsConfigured = account.credentialsConfigured !== false;
+    const username = String(account.username || (account.deviceAccount ? '设备快捷账号' : '—'));
+    const originalEmail = String(account.email || '');
+    const email = String(account.email || '尚未设置');
     const nickname = element('input', {
       className: 'h5-field',
       attrs: { value: profile.nickname, maxlength: '8', 'aria-label': '玩家昵称', 'data-testid': 'h5-profile-name' },
+    });
+    const emailInput = element('input', {
+      className: 'h5-field',
+      attrs: {
+        type: 'email', value: originalEmail, maxlength: '254', autocomplete: 'email', inputmode: 'email',
+        placeholder: '设置后可跨设备登录', 'aria-label': '登录邮箱', 'data-testid': 'h5-profile-email',
+      },
+    });
+    const currentPassword = credentialsConfigured ? element('input', {
+      className: 'h5-field',
+      attrs: {
+        type: 'password', maxlength: '128', autocomplete: 'current-password',
+        placeholder: '修改邮箱或密码时必填', 'aria-label': '当前密码', 'data-testid': 'h5-profile-current-password',
+      },
+    }) : null;
+    const newPassword = element('input', {
+      className: 'h5-field',
+      attrs: {
+        type: 'password', maxlength: '128', autocomplete: 'new-password',
+        placeholder: credentialsConfigured ? '不修改请留空' : '至少 8 个字符',
+        'aria-label': '新密码', 'data-testid': 'h5-profile-new-password',
+      },
+    });
+    const confirmPassword = element('input', {
+      className: 'h5-field',
+      attrs: {
+        type: 'password', maxlength: '128', autocomplete: 'new-password',
+        placeholder: '再次输入新密码', 'aria-label': '确认新密码', 'data-testid': 'h5-profile-confirm-password',
+      },
     });
     let emblem = profile.emblem;
     const error = element('p', { className: 'h5-field-error', attrs: { 'aria-live': 'polite' } });
@@ -635,7 +677,22 @@ export function mountH5App({ root }) {
         logout,
       ]),
       element('label', { text: '纹章' }), element('div', { className: 'h5-emblem-options' }, options),
-      element('label', { text: '昵称' }), nickname, error,
+      element('label', { text: '昵称' }), nickname,
+      element('section', { className: 'h5-profile-credentials' }, [
+        element('header', {}, [
+          element('strong', { text: credentialsConfigured ? '跨设备登录' : '开启跨设备登录' }),
+          element('span', {
+            text: credentialsConfigured
+              ? '修改登录资料需要验证当前密码'
+              : '设置邮箱和密码后，可在其他设备登录',
+          }),
+        ]),
+        element('label', { text: '邮箱' }), emailInput,
+        ...(currentPassword ? [element('label', { text: '当前密码' }), currentPassword] : []),
+        element('label', { text: credentialsConfigured ? '新密码（可选）' : '登录密码' }), newPassword,
+        element('label', { text: '确认新密码' }), confirmPassword,
+      ]),
+      error,
     ]);
     root.appendChild(dialog({
       title: '编辑玩家档案',
@@ -645,6 +702,46 @@ export function mountH5App({ root }) {
       onConfirm: async () => {
         const checked = validateNickname(nickname.value);
         if (!checked.ok) { error.textContent = checked.reason; return false; }
+        const nextEmail = emailInput.value.trim();
+        const emailChanged = nextEmail !== originalEmail;
+        const passwordChanged = newPassword.value.length > 0 || confirmPassword.value.length > 0;
+        const credentialsTouched = emailChanged || passwordChanged;
+        if (credentialsTouched) {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(nextEmail)) {
+            error.textContent = '请输入有效邮箱';
+            emailInput.focus();
+            return false;
+          }
+          if (!credentialsConfigured && newPassword.value.length < 8) {
+            error.textContent = '首次开启跨设备登录需要设置至少 8 位密码';
+            newPassword.focus();
+            return false;
+          }
+          if (passwordChanged && newPassword.value.length < 8) {
+            error.textContent = '新密码至少需要 8 个字符';
+            newPassword.focus();
+            return false;
+          }
+          if (newPassword.value !== confirmPassword.value) {
+            error.textContent = '两次输入的新密码不一致';
+            confirmPassword.focus();
+            return false;
+          }
+          if (credentialsConfigured && !currentPassword?.value) {
+            error.textContent = '请输入当前密码以确认修改';
+            currentPassword?.focus();
+            return false;
+          }
+          const credentialResult = await onlineSession.updateAccountCredentials({
+            email: nextEmail,
+            ...(passwordChanged ? { newPassword: newPassword.value } : {}),
+            ...(credentialsConfigured ? { currentPassword: currentPassword.value } : {}),
+          });
+          if (!credentialResult?.ok) {
+            error.textContent = credentialResult?.error?.message || '登录资料保存失败';
+            return false;
+          }
+        }
         const result = await onlineSession.updatePlayerProfile({ nickname: checked.nickname, emblem });
         if (result === false || result?.ok === false || result?.saved === false) {
           error.textContent = result?.error?.message || result?.message || '当前无法保存，请恢复连接后重试';
@@ -674,19 +771,37 @@ export function mountH5App({ root }) {
     const teams = onlineState.data?.teams || [];
     const activeGames = onlineState.data?.activeGames || [];
     const list = element('div', { className: 'h5-team-list', attrs: { 'data-testid': 'h5-team-list' } });
-    if (!teams.length) list.appendChild(element('div', { className: 'h5-empty', text: '暂无公开队伍，创建第一支队伍吧。' }));
+    if (!teams.length) list.appendChild(element('div', { className: 'h5-empty' }, [
+      element('span', { className: 'h5-empty__mark', text: '席' }),
+      element('strong', { text: '静候第一桌' }),
+      element('small', { text: '当前没有公开队伍，创建牌桌即可邀请侠客入席。' }),
+    ]));
     for (const team of teams) {
       const tableSize = onlineTableSize(team);
       const maxMembers = Number(team.maxMembers) || tableSize;
       const joinable = team.phase === 'lobby' && Number(team.count) < maxMembers;
-      list.appendChild(element('article', { className: 'h5-team-row' }, [
-        element('div', {}, [
-          element('strong', { text: team.name || `队伍 ${team.id}` }),
-          element('small', { text: `#${team.id} · ${tableSize} 人桌` }),
+      const memberCount = Math.max(0, Math.min(maxMembers, Number(team.count) || 0));
+      list.appendChild(element('article', { className: `h5-team-row is-${team.phase}${joinable ? ' is-joinable' : ''}` }, [
+        element('div', { className: 'h5-team-row__tablemark' }, [
+          element('strong', { text: tableSize }),
+          element('small', { text: '人桌' }),
         ]),
-        element('span', { text: `${team.count}/${maxMembers}` }),
-        element('span', { className: `is-${team.phase}`, text: PHASE_LABELS[team.phase] || team.phase }),
-        button(joinable ? '加入' : PHASE_LABELS[team.phase] || '不可加入', {
+        element('div', { className: 'h5-team-row__identity' }, [
+          element('small', { className: 'h5-team-row__serial', text: `ROOM · ${String(team.id).padStart(2, '0')}` }),
+          element('strong', { text: team.name || `队伍 ${team.id}` }),
+          element('span', { className: `h5-team-row__phase is-${team.phase}`, text: PHASE_LABELS[team.phase] || team.phase }),
+        ]),
+        element('div', { className: 'h5-team-row__occupancy' }, [
+          element('div', {}, [
+            element('span', { text: '真人席位' }),
+            element('strong', { text: `${memberCount}/${maxMembers}` }),
+          ]),
+          element('div', { className: 'h5-team-row__seats', attrs: { 'aria-label': `${memberCount} / ${maxMembers} 名真人` } },
+            Array.from({ length: maxMembers }, (_, index) => element('i', {
+              className: index < memberCount ? 'is-filled' : '',
+            }))),
+        ]),
+        button(joinable ? '入席' : PHASE_LABELS[team.phase] || '暂不可加入', {
           className: joinable ? 'h5-small-button' : 'h5-small-button is-disabled',
           attrs: { disabled: !joinable, 'data-testid': joinable ? `h5-join-team-${team.id}` : undefined },
           on: { click: () => joinable && onlineSession.joinTeam(team.id) },
@@ -697,21 +812,22 @@ export function mountH5App({ root }) {
       className: 'h5-active-games', attrs: { 'data-testid': 'h5-active-games' },
     }, [
       element('div', { className: 'h5-active-games__head' }, [
-        element('div', {}, [
-          element('h2', { text: '托管中的牌局' }),
-          element('p', { text: '离桌后系统会在轮到你时立即静观或退避，你可以随时重新接管。' }),
-        ]),
+        element('span', { className: 'h5-active-games__sigil', text: '续' }),
+        element('div', {}, [element('h2', { text: '续接牌局' }), element('p', { text: '你的原席仍被保留，可立即返回接管。' })]),
       ]),
       element('div', { className: 'h5-active-games__list' }, activeGames.map((game) => element('article', {
         className: 'h5-active-game', attrs: { 'data-testid': `h5-active-game-${game.id}` },
       }, [
-        element('div', {}, [
+        element('span', { className: 'h5-active-game__table', text: String(game.tableSize || 6) }),
+        element('div', { className: 'h5-active-game__identity' }, [
           element('strong', { text: game.name || `房间 ${game.id}` }),
-          element('small', { text: `#${game.id} · ${game.tableSize}人桌 · 第${game.round || 1}局 · ${game.heroName || '原席位'}` }),
+          element('small', { text: `#${game.id} · 第${game.round || 1}局 · ${game.heroName || '原席位'}` }),
         ]),
         element('span', {
-          className: game.alive ? 'is-alive' : 'is-dead',
-          text: game.alive ? `托管中 · 气血 ${game.hp}` : '已阵亡 · 可观战',
+          className: `h5-active-game__state ${game.alive ? 'is-alive' : 'is-dead'}`,
+          text: game.alive
+            ? `${game.managed === false ? '已接管' : '托管中'} · 气血 ${game.hp}`
+            : '已阵亡 · 可观战',
         }),
         button('继续牌局', {
           className: 'h5-small-button',
@@ -721,36 +837,52 @@ export function mountH5App({ root }) {
       ]))),
     ]) : null;
     clear(root, element('div', { className: 'h5-screen h5-lobby', attrs: { 'data-testid': 'h5-online-lobby' } }, [
-      header({
-        title: '联机大厅',
-        subtitle: `${profile.emblem} ${profile.nickname} · #${profile.shortId}`,
-        subtitleTestId: 'h5-player-id',
-        status: onlineState.profileSync === 'synced' ? '● 在线 · 档案已同步' : '● 在线 · 同步中',
-        statusTestId: 'h5-player-sync',
-      }),
+      element('header', { className: 'h5-page-header h5-lobby-masthead' }, [
+        element('div', { className: 'h5-lobby-player' }, [
+          element('img', { attrs: { src: playerAvatarUrl(profile.avatarId), alt: '', draggable: 'false' } }),
+          element('div', { attrs: { 'data-testid': 'h5-player-id' } }, [
+            element('span', { text: 'ONLINE LOBBY' }),
+            element('strong', { text: profile.nickname }),
+            element('small', { text: `${profile.emblem} · #${profile.shortId}` }),
+          ]),
+        ]),
+        element('div', { className: 'h5-lobby-masthead__title' }, [
+          element('strong', { text: '群英会馆' }),
+          element('span', { text: '以牌会友 · 共逐天下' }),
+        ]),
+        element('span', {
+          className: 'h5-page-header__status h5-lobby-status',
+          text: onlineState.profileSync === 'synced' ? '在线 · 已同步' : '在线 · 同步中',
+          attrs: { 'data-testid': 'h5-player-sync' },
+        }),
+      ]),
       element('main', { className: 'h5-lobby__body' }, [
         activeGameList,
         element('div', { className: 'h5-lobby__head' }, [
-          element('div', {}, [element('h1', { text: '公开队伍' }), element('p', { text: '6 / 9 人桌 · 1 人即可开局 · AI 自动补位' })]),
           element('div', {}, [
-            button('牌谱', {
+            element('span', { className: 'h5-lobby__eyebrow', text: 'TABLE DIRECTORY' }),
+            element('h1', { text: '寻找牌桌' }),
+            element('p', { text: '6 / 9 人桌 · 单人即可开局 · 空位由 AI 补齐' }),
+          ]),
+          element('div', { className: 'h5-lobby-tools' }, [
+            button('▤ 牌谱', {
               className: 'h5-secondary-button',
               attrs: { 'data-testid': 'h5-hand-history-open' },
               on: { click: openH5HandHistory },
             }),
-            button('统计', {
+            button('▥ 统计', {
               className: 'h5-secondary-button',
               attrs: { 'data-testid': 'h5-player-stats-open' },
               on: { click: () => openPlayerStats(profile) },
             }),
-            button('档案', { className: 'h5-secondary-button', attrs: { 'data-testid': 'h5-profile-edit' }, on: { click: openH5Profile } }),
-            button('刷新', { className: 'h5-secondary-button', on: { click: () => onlineSession.refreshLobby() } }),
+            button('◇ 档案', { className: 'h5-secondary-button', attrs: { 'data-testid': 'h5-profile-edit' }, on: { click: openH5Profile } }),
+            button('↻ 刷新', { className: 'h5-secondary-button', on: { click: () => onlineSession.refreshLobby() } }),
           ]),
         ]),
         list,
       ]),
-      element('footer', { className: 'h5-sticky-footer' }, button('创建队伍', {
-        className: 'h5-primary-button',
+      element('footer', { className: 'h5-sticky-footer h5-lobby-footer' }, button('', {
+        className: 'h5-primary-button h5-lobby-create',
         attrs: { 'data-testid': 'h5-create-team' },
         on: {
           click: () => {
@@ -787,7 +919,14 @@ export function mountH5App({ root }) {
             }));
           },
         },
-      })),
+      }, [
+        element('span', { className: 'h5-lobby-create__mark', text: '＋' }),
+        element('span', { className: 'h5-lobby-create__copy' }, [
+          element('strong', { text: '创建新队伍' }),
+          element('small', { text: '自选 6 人桌或 9 人桌' }),
+        ]),
+        element('span', { className: 'h5-lobby-create__arrow', text: '›' }),
+      ])),
     ]));
   }
 
@@ -812,93 +951,249 @@ export function mountH5App({ root }) {
           },
           on: { click: () => openPlayerStats(member) },
         }, [
+          element('span', { className: 'h5-room-seat__avatar-wrap' }, [
+            element('img', {
+              className: 'h5-room-seat__avatar',
+              attrs: { src: playerAvatarUrl(member.avatarId), alt: '', draggable: 'false' },
+            }),
+            element('span', {
+              className: `h5-room-seat__presence is-${memberConnection(member)}`,
+              attrs: { title: memberConnectionLabel(member) },
+            }),
+          ]),
+          element('span', { className: 'h5-room-seat__identity' }, [
+            element('span', { className: 'h5-room-seat__name-row' }, [
+              element('strong', { text: member.name, attrs: { 'data-testid': 'h5-room-member-name' } }),
+              member.isOwner && element('i', { className: 'h5-room-seat__badge', text: '房主' }),
+              member.isYou && element('i', { className: 'h5-room-seat__badge is-you', text: '你' }),
+            ]),
+            element('small', {
+              className: `is-${memberConnection(member)}`,
+              text: `${member.shortId ? `#${member.shortId}` : '玩家'} · ${memberConnectionLabel(member)}`,
+              attrs: { 'data-testid': 'h5-room-member-id' },
+            }),
+            element('span', {
+              className: 'h5-room-seat__stats-open',
+              text: '查看牌风数据 ›',
+              attrs: { 'data-testid': 'h5-player-stats-open' },
+            }),
+          ]),
           element('span', {
             className: 'h5-room-seat__emblem',
             text: member.emblem || (member.isYou ? profile.emblem : '侠'),
             attrs: { 'data-testid': 'h5-room-member-emblem' },
           }),
-          element('strong', { text: member.name, attrs: { 'data-testid': 'h5-room-member-name' } }),
-          element('small', {
-            className: `is-${memberConnection(member)}`,
-            text: `${member.shortId ? `#${member.shortId} · ` : ''}${member.isYou ? '你 · ' : ''}${member.isOwner ? '房主 · ' : '成员 · '}${memberConnectionLabel(member)}`,
-            attrs: { 'data-testid': 'h5-room-member-id' },
-          }),
-          element('span', {
-            className: 'h5-room-seat__stats-open',
-            text: '查看统计',
-            attrs: { 'data-testid': 'h5-player-stats-open' },
-          }),
         ])
-        : element('article', { className: 'h5-room-seat is-empty' }, [element('span', { text: '+' }), element('strong', { text: '等待玩家' }), element('small', { text: '开局后 AI 补位' })]));
+        : element('article', { className: 'h5-room-seat is-empty' }, [
+          element('span', { text: '+' }),
+          element('span', { className: 'h5-room-seat__empty-copy' }, [
+            element('strong', { text: '等待侠客' }),
+            element('small', { text: '开局后由 AI 补位' }),
+          ]),
+        ]));
     }
     const aiCount = Math.max(0, totalPlayers - members.length);
     const isOwner = Boolean(data.isOwner || me?.isOwner);
     const startBlocked = unavailableMembers.length > 0;
+    const chatMessages = Array.isArray(data.chatMessages) ? data.chatMessages : [];
+    const chatList = element('div', {
+      className: 'h5-room-chat__messages',
+      attrs: { 'data-testid': 'h5-room-chat-messages', 'aria-live': 'polite' },
+    });
+    if (!chatMessages.length) {
+      chatList.append(element('div', { className: 'h5-room-chat__empty' }, [
+        element('strong', { text: '和同桌侠客打个招呼' }),
+        element('span', { text: '消息仅在当前房间可见，最多保留最近 60 条。' }),
+      ]));
+    } else {
+      for (const message of chatMessages) {
+        const mine = Boolean(message.playerId && message.playerId === profile.playerId)
+          || Boolean(message.shortId && message.shortId === profile.shortId);
+        chatList.append(element('article', { className: `h5-room-chat__message${mine ? ' is-mine' : ''}` }, [
+          element('img', {
+            className: 'h5-room-chat__avatar',
+            attrs: { src: playerAvatarUrl(message.avatarId), alt: '', draggable: 'false' },
+          }),
+          element('div', { className: 'h5-room-chat__bubble' }, [
+            element('span', { className: 'h5-room-chat__meta' }, [
+              element('strong', { text: mine ? '我' : (message.name || '侠客') }),
+              element('time', { text: roomMessageTime(message.ts) }),
+            ]),
+            element('p', { text: message.text || '' }),
+          ]),
+        ]));
+      }
+    }
+    const chatInput = element('input', {
+      className: 'h5-room-chat__input',
+      attrs: {
+        type: 'text', maxlength: '80', autocomplete: 'off', enterkeyhint: 'send',
+        placeholder: '和同桌玩家交流…', 'aria-label': '房间聊天内容',
+        'data-testid': 'h5-room-chat-input',
+      },
+    });
+    const submitChat = () => {
+      const text = chatInput.value.trim();
+      if (!text || !onlineSession.sendRoomChat(text)) return;
+      chatInput.value = '';
+      chatInput.focus({ preventScroll: true });
+    };
+    const chatSend = button('发送', {
+      className: 'h5-room-chat__send',
+      attrs: { 'data-testid': 'h5-room-chat-send', 'aria-label': '发送房间消息' },
+      on: { click: submitChat },
+    });
+    chatInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      submitChat();
+    });
     clear(root, element('div', { className: 'h5-screen h5-room', attrs: { 'data-testid': 'h5-online-room' } }, [
       header({ title: data.name || '队伍房间', subtitle: `房间 #${data.id || ''} · ${totalPlayers} 人桌 · ${members.length}/${maxMembers} 真人`, onBack: onlineBack, status: '● 在线' }),
       element('main', { className: 'h5-room__body' }, [
         element('section', { className: 'h5-room__seats' }, [
-          element('div', { className: 'h5-room__section-head' }, [element('h1', { text: '真人席位' }), element('span', { text: '无准备环节' })]),
+          element('div', { className: 'h5-room__section-head' }, [
+            element('span', {}, [element('i', { className: 'h5-room__eyebrow', text: 'ROOM ROSTER' }), element('h1', { text: '同桌侠客' })]),
+            element('span', { className: 'h5-room__seat-count', text: `${members.length} 真人 · ${aiCount} AI 补位` }),
+          ]),
           element('div', {
             className: 'h5-room-seat-grid',
             attrs: { 'data-testid': 'h5-room-members', 'data-table-size': String(totalPlayers) },
           }, seats),
         ]),
-        element('aside', { className: 'h5-room__summary' }, [
-          element('h2', { text: '本局信息' }),
-          element('dl', {}, [
-            element('div', {}, [element('dt', { text: '桌型' }), element('dd', { text: `${totalPlayers} 人桌` })]),
-            element('div', {}, [element('dt', { text: '真人' }), element('dd', { text: `${members.length}/${maxMembers}` })]),
-            element('div', {}, [element('dt', { text: 'AI 补位' }), element('dd', { text: `${aiCount} 名` })]),
-            element('div', {}, [element('dt', { text: '总人数' }), element('dd', { text: `${totalPlayers} 人` })]),
-            element('div', {}, [element('dt', { text: '赛制' }), element('dd', { text: '12 回合' })]),
+        element('section', { className: 'h5-room__social' }, [
+          element('section', { className: 'h5-room-chat' }, [
+            element('div', { className: 'h5-room-chat__head' }, [
+              element('span', {}, [element('strong', { text: '房间聊天' }), element('small', { text: `${chatMessages.length}/60` })]),
+              element('span', { text: '同桌可见' }),
+            ]),
+            chatList,
+            element('div', { className: 'h5-room-chat__composer' }, [chatInput, chatSend]),
           ]),
-          element('div', { className: 'h5-room__profile-actions' }, [
-            button('牌局记录', {
-              className: 'h5-secondary-button',
-              attrs: { 'data-testid': 'h5-hand-history-open' },
-              on: { click: openH5HandHistory },
-            }),
-            button('编辑档案', { className: 'h5-secondary-button', on: { click: openH5Profile } }),
+          element('aside', { className: 'h5-room__summary' }, [
+            element('div', { className: 'h5-room__summary-head' }, [
+              element('span', {}, [element('small', { text: `${totalPlayers} 人桌` }), element('strong', { text: '12 回合' })]),
+              element('span', { text: `#${data.id || '—'}` }),
+            ]),
+            element('div', { className: 'h5-room__quick-links' }, [
+              button('牌局记录', {
+                className: 'h5-room__link-button',
+                attrs: { 'data-testid': 'h5-hand-history-open' },
+                on: { click: openH5HandHistory },
+              }),
+              button('我的档案', { className: 'h5-room__link-button', on: { click: openH5Profile } }),
+            ]),
+            element('div', { className: 'h5-room__actions' }, [
+              isOwner
+                ? button(`开始选将 · ${members.length}真人 + ${aiCount}AI`, {
+                  className: 'h5-primary-button',
+                  attrs: {
+                    'data-testid': 'h5-start-pick',
+                    disabled: startBlocked,
+                    title: startBlocked ? '有成员正在重连或离线保留，暂不能开始' : undefined,
+                  },
+                  on: { click: () => onlineSession.startPick() },
+                })
+                : element('span', { className: 'h5-room__waiting', text: '等待房主开始选将…' }),
+              startBlocked && element('span', {
+                className: 'h5-room__connection-warning',
+                text: `${unavailableMembers.length} 名成员正在重连或离线保留`,
+              }),
+              button('退出队伍', { className: 'h5-danger-button', attrs: { 'data-testid': 'h5-leave-team' }, on: { click: onlineBack } }),
+            ]),
           ]),
         ]),
       ]),
-      element('footer', { className: 'h5-sticky-footer h5-room__actions' }, [
-        isOwner
-          ? button(`开始选将 · ${members.length}真人 + ${aiCount}AI`, {
-            className: 'h5-primary-button',
-            attrs: {
-              'data-testid': 'h5-start-pick',
-              disabled: startBlocked,
-              title: startBlocked ? '有成员正在重连或离线保留，暂不能开始' : undefined,
-            },
-            on: { click: () => onlineSession.startPick() },
-          })
-          : element('span', { className: 'h5-room__waiting', text: '等待房主开始选将…' }),
-        startBlocked && element('span', {
-          className: 'h5-room__connection-warning',
-          text: `${unavailableMembers.length} 名成员正在重连或离线保留`,
-        }),
-        button('退出队伍', { className: 'h5-danger-button', attrs: { 'data-testid': 'h5-leave-team' }, on: { click: onlineBack } }),
-      ]),
     ]));
+    requestAnimationFrame(() => { chatList.scrollTop = chatList.scrollHeight; });
   }
 
   function renderOnlinePick() {
     const data = onlineState.data || {};
-    const unavailableMembers = (data.members || []).filter((member) => memberConnection(member) !== 'online');
+    const members = Array.isArray(data.members) ? data.members : [];
+    const unavailableMembers = members.filter((member) => memberConnection(member) !== 'online');
     const startBlocked = unavailableMembers.length > 0;
     const picks = data.heroes || [];
     const mine = picks.find((item) => item.mine);
-    if (!selectedHeroId || picks.find((item) => item.id === selectedHeroId && item.takenBy && !item.mine)) {
+    const locked = Boolean(mine);
+    const deadlineAt = Number(data.deadlineAt)
+      || (Date.now() + Math.max(0, Number(data.deadline) || 0) * 1000);
+    const updateDraftDeadline = () => {
+      const target = root.querySelector('[data-testid="h5-pick-deadline"]');
+      if (!target) return;
+      const seconds = Math.max(0, Math.ceil((deadlineAt - Date.now()) / 1000));
+      target.textContent = seconds > 0 ? `剩余 ${seconds} 秒 · 超时自动分配` : '正在自动分配未选英雄';
+    };
+    const deadlineTimer = window.setInterval(updateDraftDeadline, 250);
+    currentView = { destroy: () => window.clearInterval(deadlineTimer) };
+    if (locked) {
+      selectedHeroId = mine.id;
+    } else if (!selectedHeroId || picks.find((item) => item.id === selectedHeroId && item.takenBy)) {
       selectedHeroId = mine?.id || picks.find((item) => !item.takenBy)?.id || HEROES[0].id;
     }
     const render = () => {
       const hero = getHero(selectedHeroId) || HEROES[0];
       const option = picks.find((item) => item.id === hero.id) || {};
+      const readyCount = members.filter((member) => member.ready || member.heroId).length;
+      const chatMessages = Array.isArray(data.chatMessages) ? data.chatMessages : [];
+      const chatList = element('div', {
+        className: 'h5-pick-chat__messages',
+        attrs: { 'data-testid': 'h5-pick-chat-messages', 'aria-live': 'polite' },
+      });
+      if (!chatMessages.length) {
+        chatList.appendChild(element('div', { className: 'h5-pick-chat__empty' }, [
+          element('strong', { text: '选将时也可以交流' }),
+          element('span', { text: '提醒队友阵容搭配，或直接打个招呼。' }),
+        ]));
+      } else {
+        chatMessages.forEach((message) => {
+          const isMine = (message.playerId && message.playerId === profile.playerId)
+            || (message.shortId && message.shortId === profile.shortId);
+          chatList.appendChild(element('article', {
+            className: `h5-pick-chat__message${isMine ? ' is-mine' : ''}`,
+          }, [
+            element('img', {
+              className: 'h5-pick-chat__avatar',
+              attrs: { src: playerAvatarUrl(message.avatarId), alt: '', draggable: 'false' },
+            }),
+            element('div', {}, [
+              element('span', {}, [
+                element('strong', { text: isMine ? '我' : String(message.name || '侠客') }),
+                element('time', { text: roomMessageTime(message.ts) }),
+              ]),
+              element('p', { text: String(message.text || '') }),
+            ]),
+          ]));
+        });
+      }
+      const chatInput = element('input', {
+        className: 'h5-pick-chat__input',
+        attrs: {
+          type: 'text', maxlength: '80', autocomplete: 'off',
+          placeholder: '和同桌玩家交流…', 'aria-label': '选将聊天内容',
+          'data-testid': 'h5-pick-chat-input',
+        },
+      });
+      const sendMessage = () => {
+        const text = String(chatInput.value || '').trim();
+        if (!text || !onlineSession.sendRoomChat(text)) return;
+        chatInput.value = '';
+        chatInput.focus();
+      };
+      const chatSend = button('发送', {
+        className: 'h5-pick-chat__send',
+        attrs: { 'data-testid': 'h5-pick-chat-send', 'aria-label': '发送选将消息' },
+        on: { click: sendMessage },
+      });
+      chatInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' || event.isComposing) return;
+        event.preventDefault();
+        sendMessage();
+      });
+
       const ownerAction = data.isOwner
         ? button(startBlocked ? '等待成员恢复' : data.allPicked ? '全员已选 · 开战' : '等待全员选定', {
-          className: 'h5-danger-button h5-hero-detail__start',
+          className: 'h5-danger-button h5-pick-roster__start',
           attrs: {
             disabled: !data.allPicked || startBlocked,
             'data-testid': 'h5-start-game',
@@ -906,26 +1201,133 @@ export function mountH5App({ root }) {
           },
           on: { click: () => onlineSession.startGame() },
         })
-        : element('p', { className: 'h5-hero-detail__waiting', text: data.allPicked ? '等待房主开战…' : '等待队友选择…' });
+        : element('p', { className: 'h5-pick-roster__waiting', text: data.allPicked ? '等待房主开战…' : '等待队友选择…' });
+
+      const memberRows = members.map((member, index) => {
+        const memberHero = member.heroId ? getHero(member.heroId) : null;
+        const ready = Boolean(memberHero);
+        const heroPortrait = memberHero
+          ? element('span', {
+            className: 'h5-pick-player__hero',
+            attrs: { title: memberHero.name, 'aria-label': `已选择${memberHero.name}` },
+          })
+          : element('span', { className: 'h5-pick-player__hero is-empty', text: '?' });
+        if (memberHero) heroPortrait.style.backgroundImage = `url("${h5HeroPortrait(memberHero, 'thumb')}")`;
+        return element('article', {
+          className: `h5-pick-player${ready ? ' is-ready' : ' is-waiting'}${member.isYou ? ' is-you' : ''}`,
+          attrs: { 'data-testid': 'h5-pick-player', 'data-ready': String(ready) },
+        }, [
+          element('span', { className: 'h5-pick-player__avatar-wrap' }, [
+            element('img', {
+              className: 'h5-pick-player__avatar',
+              attrs: { src: playerAvatarUrl(member.avatarId), alt: '', draggable: 'false' },
+            }),
+            element('i', { className: `h5-pick-player__presence is-${memberConnection(member)}` }),
+          ]),
+          element('span', { className: 'h5-pick-player__identity' }, [
+            element('span', { className: 'h5-pick-player__name' }, [
+              element('strong', { text: String(member.name || `玩家${index + 1}`) }),
+              member.isOwner && element('i', { text: '房主' }),
+              member.isYou && element('i', { className: 'is-you', text: '你' }),
+            ]),
+            element('small', { text: ready ? `${memberHero.name} · 已准备` : '尚未选择 · 未准备' }),
+          ]),
+          heroPortrait,
+        ]);
+      });
+
+      const lockedPortrait = element('div', { className: 'h5-pick-lock__portrait' },
+        element('span', { text: '已确认 · 本局不可更换' }));
+      lockedPortrait.style.backgroundImage = `url("${h5HeroPortrait(hero, 'detail')}")`;
+      const center = locked
+        ? element('section', { className: 'h5-pick-lock', attrs: { 'data-testid': 'h5-pick-locked' } }, [
+          lockedPortrait,
+          element('div', { className: 'h5-pick-lock__content' }, [
+            element('header', {}, [
+              element('div', {}, [
+                element('small', { text: 'YOUR HERO' }),
+                element('h2', { text: hero.name }),
+              ]),
+              element('span', { text: hero.type }),
+            ]),
+            element('div', { className: 'h5-pick-lock__traits' }, [
+              element('span', { text: hero.type }),
+              element('span', { text: hero.skillName }),
+              element('span', { text: `${hero.skillCost}⚡` }),
+            ]),
+            element('section', {}, [
+              element('h3', { text: `主动 · ${hero.skillName}` }),
+              element('p', { text: hero.skillDesc }),
+              element('small', { text: `发动条件：${hero.condDesc}` }),
+            ]),
+            element('section', {}, [
+              element('h3', { text: '被动特性' }),
+              element('p', { text: hero.passiveDesc }),
+            ]),
+            element('blockquote', { text: `“${hero.lines?.enter || ''}”` }),
+          ]),
+        ])
+        : element('section', { className: 'h5-pick-select', attrs: { 'data-testid': 'h5-pick-select' } }, [
+          element('header', { className: 'h5-pick-select__head' }, [
+            element('div', {}, [
+              element('small', { text: 'HERO ROSTER' }),
+              element('h2', { text: '选择你的英雄' }),
+            ]),
+            element('span', { text: `${picks.filter((item) => !item.takenBy).length} 名可选` }),
+          ]),
+          element('div', { className: 'h5-pick-select__grid' }, heroCards({ picks, onSelect: render })),
+          element('footer', { className: 'h5-pick-select__confirm' }, [
+            element('div', {}, [
+              element('strong', { text: `${hero.name} · ${hero.type}` }),
+              element('span', { text: `主动：${hero.skillName} · ${hero.skillCost}⚡` }),
+            ]),
+            button('确认选择', {
+              className: 'h5-primary-button',
+              attrs: {
+                disabled: Boolean(option.takenBy),
+                'data-testid': 'h5-confirm-hero',
+              },
+              on: { click: () => onlineSession.pickHero(hero.id) },
+            }),
+          ]),
+        ]);
+
       clear(root, element('div', { className: 'h5-screen h5-pick', attrs: { 'data-testid': 'h5-online-pick' } }, [
-        header({ title: '选择英雄', subtitle: '联机 · 英雄不可重复', onBack: onlineBack, status: `${data.deadline || 0}s` }),
+        header({
+          title: data.name || '选择英雄',
+          subtitle: `${onlineTableSize(data)} 人桌 · 英雄不可重复 · 确认后不可更换`,
+          onBack: onlineBack,
+          status: `${readyCount}/${members.length || 1} 已就绪`,
+        }),
         element('div', { className: 'h5-pick__body' }, [
-          element('section', { className: 'h5-pick__grid-wrap' }, element('div', { className: 'h5-hero-grid' }, heroCards({ picks, onSelect: render }))),
-          heroDetail({
-            hero,
-            primaryText: option.mine ? '已选，可点击更换' : '选择该英雄',
-            primaryDisabled: Boolean(option.takenBy && !option.mine),
-            onPrimary: () => onlineSession.pickHero(hero.id),
-            secondary: [
-              ownerAction,
-              startBlocked && element('p', {
-                className: 'h5-room__connection-warning',
-                text: `${unavailableMembers.length} 名成员正在重连或离线保留，恢复后才能开战。`,
+          element('aside', { className: 'h5-pick-roster', attrs: { 'data-testid': 'h5-pick-members' } }, [
+            element('header', {}, [
+              element('div', {}, [element('small', { text: 'TEAM STATUS' }), element('h2', { text: '同桌玩家' })]),
+              element('strong', { text: `${readyCount}/${members.length || 1}` }),
+            ]),
+            element('div', { className: 'h5-pick-roster__list' }, memberRows),
+            element('footer', {}, [
+              element('span', {
+                text: `剩余 ${Math.max(0, Number(data.deadline) || 0)} 秒 · 超时自动分配`,
+                attrs: { 'data-testid': 'h5-pick-deadline' },
               }),
-            ],
-          }),
+              startBlocked && element('span', { className: 'h5-room__connection-warning', text: `${unavailableMembers.length} 名成员离线` }),
+              ownerAction,
+            ]),
+          ]),
+          center,
+          element('aside', { className: 'h5-pick-chat' }, [
+            element('header', {}, [
+              element('div', {}, [element('small', { text: 'ROOM CHAT' }), element('h2', { text: '房间聊天' })]),
+              element('span', { text: `${chatMessages.length}/60` }),
+            ]),
+            chatList,
+            element('div', { className: 'h5-pick-chat__composer' }, [chatInput, chatSend]),
+          ]),
         ]),
       ]));
+      updateDraftDeadline();
+      requestAnimationFrame(() => { chatList.scrollTop = chatList.scrollHeight; });
     };
     render();
   }

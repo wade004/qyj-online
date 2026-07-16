@@ -51,6 +51,8 @@ test('guestId 建档后跨数据库重开保持稳定身份与资料', async () 
     assert.match(first.profile.shortId, /^[0-9A-F]{8}$/u);
     assert.equal(first.profile.nickname, '燕云客');
     assert.equal(first.profile.emblem, '墨');
+    assert.ok(Number.isInteger(first.profile.avatarId));
+    assert.ok(first.profile.avatarId >= 1 && first.profile.avatarId <= 20);
     assert.equal(first.profile.createdAt, new Date(now).toISOString());
     assert.deepEqual(first.profile.stats, {
       matches: 0, wins: 0, top3: 0, winRate: 0, bestRank: null,
@@ -77,6 +79,7 @@ test('guestId 建档后跨数据库重开保持稳定身份与资料', async () 
     assert.equal(again.profile.shortId, first.profile.shortId);
     assert.equal(again.profile.nickname, '持久客');
     assert.equal(again.profile.emblem, '月');
+    assert.equal(again.profile.avatarId, first.profile.avatarId);
     assert.equal(again.profile.createdAt, first.profile.createdAt);
     assert.equal(again.profile.lastSeenAt, new Date(now).toISOString());
     reopened.close();

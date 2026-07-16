@@ -333,6 +333,7 @@ export function startServer(port = 8790, {
     playerId: profile?.playerId ?? null,
     shortId: profile?.shortId ?? null,
     emblem: profile?.emblem ?? '侠',
+    avatarId: Number(profile?.avatarId) || 1,
     stats: profile?.stats ? { ...profile.stats } : emptyStats(),
     pokerStats: profile?.pokerStats ? { ...profile.pokerStats } : null,
   });
@@ -410,10 +411,15 @@ export function startServer(port = 8790, {
       .filter((team) => team.phase === 'playing' && team.game)
       .flatMap((team) => {
         const game = team.game;
-        for (const seat of game.detachedSeats || []) {
+        const candidateSeats = new Set(game.detachedSeats || []);
+        if (Number(client.teamId) === Number(team.id) && Number.isInteger(Number(client.seat))) {
+          candidateSeats.add(Number(client.seat));
+        }
+        for (const seat of candidateSeats) {
           const member = game.seatToClient.get(seat);
-          if (member?.playerId !== client.playerId) continue;
+          if (member !== client && member?.playerId !== client.playerId) continue;
           const player = game.engine.players[seat];
+          const managed = game.detachedSeats?.has(seat) === true;
           return [{
             id: team.id,
             name: team.name,
@@ -424,6 +430,8 @@ export function startServer(port = 8790, {
             heroId: player?.hero?.id || null,
             heroName: player?.hero?.name || null,
             hp: Math.max(0, Number(player?.hp) || 0),
+            managed,
+            attached: !managed,
           }];
         }
         return [];
@@ -479,10 +487,12 @@ export function startServer(port = 8790, {
 
   function accountFromSession(value) {
     const source = value?.account || value;
-    if (!source || (!source.username && !source.email)) return null;
+    if (!source || (!source.username && !source.email && !source.deviceAccount)) return null;
     return {
       username: source.username,
       email: source.email,
+      deviceAccount: Boolean(source.deviceAccount),
+      credentialsConfigured: source.credentialsConfigured !== false,
       createdAt: source.createdAt,
     };
   }
@@ -630,6 +640,7 @@ export function startServer(port = 8790, {
           id: team.id, name: team.name, phase: team.phase,
           members, isOwner: id === team.ownerId,
           yourName: c.name,
+          chatMessages: Array.isArray(team.chatMessages) ? team.chatMessages : [],
           ...tableRules(team),
         },
       });
@@ -641,6 +652,24 @@ export function startServer(port = 8790, {
     for (const id of team.members) {
       const c = clients.get(id);
       if (!c) continue;
+      const members = team.members
+        .map((id2) => clients.get(id2))
+        .filter(Boolean)
+        .map((c2) => {
+          const heroId = team.picks[c2.id] || null;
+          const hero = heroId ? getHero(heroId) : null;
+          return {
+            name: c2.name,
+            isOwner: c2.id === team.ownerId,
+            isYou: c2.id === id,
+            connected: c2.connected,
+            connection: c2.connected ? 'online' : 'offline',
+            heroId,
+            heroName: hero?.name || null,
+            ready: Boolean(heroId),
+            ...playerSummary(c2.playerProfile),
+          };
+        });
       const heroes = HEROES.map((hh) => {
         let takenBy = null;
         for (const id2 of team.members) {
@@ -654,9 +683,14 @@ export function startServer(port = 8790, {
       send(c, {
         ev: 'pick',
         a: {
-          heroes, allPicked,
+          id: team.id,
+          name: team.name,
+          heroes, members, allPicked,
           isOwner: id === team.ownerId,
           deadline: Math.max(0, Math.ceil(team.pickLeft || 0)),
+          serverNow: Date.now(),
+          deadlineAt: Date.now() + Math.max(0, Math.ceil(((team.pickLeft || 0) / speed) * 1000)),
+          chatMessages: Array.isArray(team.chatMessages) ? team.chatMessages : [],
           ...tableRules(team),
         },
       });
@@ -1158,6 +1192,9 @@ export function startServer(port = 8790, {
           s: snapshot(game),
         });
       }
+      // Mark the end of the authoritative recovery payload. This also covers
+      // the between-hands state where no hole/onAwaitAction event is emitted.
+      send(client, { ev: 'resumeReady', a: { teamId: team.id, seat: client.seat } });
       return;
     }
     sendTeamState(team);
@@ -1388,6 +1425,7 @@ export function startServer(port = 8790, {
         phase: 'lobby',
         picks: {},
         game: null,
+        chatMessages: [],
       };
       nextTeamId++;
       teams.set(team.id, team);
@@ -1427,7 +1465,21 @@ export function startServer(port = 8790, {
       sendLobbyTo(client);
 
     } else if (cmd === 'rejoinGame') {
-      if (client.teamId) return fail(client, ERROR_CODES.ALREADY_IN_ROOM, '请先离开当前房间');
+      if (client.teamId) {
+        const team = teams.get(Number(client.teamId));
+        const game = team?.phase === 'playing' ? team.game : null;
+        const seat = Number(client.seat);
+        const alreadyAttached = Number(client.teamId) === Number(msg.teamId)
+          && game && Number.isInteger(seat) && game.seatToClient.get(seat) === client;
+        if (!alreadyAttached) {
+          return fail(client, ERROR_CODES.ALREADY_IN_ROOM, '请先离开当前房间');
+        }
+        // Idempotent recovery: a previous request may have rebound the seat
+        // even if the client returned to the lobby before rendering finished.
+        sendResumeState(client);
+        sendTeamState(team);
+        return;
+      }
       if (!rejoinDetachedGame(client, msg.teamId)) {
         fail(client, ERROR_CODES.GAME_NOT_REJOINABLE, '该牌局已结束或不属于当前账号');
         sendLobbyTo(client);
@@ -1470,6 +1522,9 @@ export function startServer(port = 8790, {
       const team = client.teamId ? teams.get(client.teamId) : null;
       if (!team) return fail(client, ERROR_CODES.NOT_IN_ROOM, '当前不在队伍中');
       if (team.phase !== 'picking') return fail(client, ERROR_CODES.INVALID_ROOM_PHASE, '当前不在选将阶段');
+      if (team.picks[client.id]) {
+        return fail(client, ERROR_CODES.HERO_ALREADY_LOCKED, '英雄已确认，本局不可更换');
+      }
       if (!getHero(msg.heroId)) return fail(client, ERROR_CODES.HERO_NOT_FOUND, '英雄不存在');
       for (const id2 of team.members) {
         if (id2 !== client.id && team.picks[id2] === msg.heroId) {
@@ -1506,14 +1561,22 @@ export function startServer(port = 8790, {
       const team = client.teamId ? teams.get(client.teamId) : null;
       if (!team) return fail(client, ERROR_CODES.NOT_IN_ROOM, '当前不在队伍中');
       const text = String(msg.text || '').trim().normalize('NFC');
+      const chatMessage = {
+        id: `${Date.now().toString(36)}-${client.id}-${Math.random().toString(36).slice(2, 7)}`,
+        playerId: client.playerId || null,
+        shortId: client.playerProfile?.shortId || null,
+        avatarId: Number(client.playerProfile?.avatarId) || 1,
+        seat: client.seat || null,
+        name: client.name,
+        text,
+        ts: Date.now(),
+      };
+      if (!Array.isArray(team.chatMessages)) team.chatMessages = [];
+      team.chatMessages.push(chatMessage);
+      if (team.chatMessages.length > 60) team.chatMessages.splice(0, team.chatMessages.length - 60);
       broadcastTeam(team, {
         ev: 'chat',
-        a: {
-          seat: client.seat || null,
-          name: client.name,
-          text,
-          ts: Date.now(),
-        },
+        a: chatMessage,
       });
 
     } else if (cmd === 'act') {

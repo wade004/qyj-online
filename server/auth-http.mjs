@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto';
 import { PlayerValidationError } from './player-store.mjs';
 
 export const AUTH_COOKIE_NAME = 'qyj_session';
+export const DEVICE_COOKIE_NAME = 'qyj_device';
 export const DEFAULT_AUTH_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+export const DEFAULT_DEVICE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60;
 const MAX_JSON_BYTES = 16 * 1024;
 const LOCAL_TRUSTED_ORIGINS = new Set([
   'http://127.0.0.1:8080',
@@ -14,6 +16,7 @@ const RATE_WINDOWS = Object.freeze({
   register: { limit: 5, windowMs: 10 * 60_000 },
   loginIp: { limit: 20, windowMs: 10 * 60_000 },
   loginIdentity: { limit: 10, windowMs: 10 * 60_000 },
+  device: { limit: 20, windowMs: 10 * 60_000 },
   resetIp: { limit: 8, windowMs: 15 * 60_000 },
   resetEmail: { limit: 4, windowMs: 15 * 60_000 },
   resetConfirm: { limit: 10, windowMs: 15 * 60_000 },
@@ -53,6 +56,10 @@ export function authTokenFromRequest(request) {
   return parseCookies(request?.headers?.cookie).get(AUTH_COOKIE_NAME) || '';
 }
 
+export function deviceTokenFromRequest(request) {
+  return parseCookies(request?.headers?.cookie).get(DEVICE_COOKIE_NAME) || '';
+}
+
 export function authSessionHash(token) {
   return token ? createHash('sha256').update(String(token), 'utf8').digest('hex') : '';
 }
@@ -60,6 +67,18 @@ export function authSessionHash(token) {
 function sessionCookie(token, { secure = false, maxAge = DEFAULT_AUTH_SESSION_MAX_AGE_SECONDS } = {}) {
   const attributes = [
     `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${Math.max(0, Math.floor(maxAge))}`,
+  ];
+  if (secure) attributes.push('Secure');
+  return attributes.join('; ');
+}
+
+function deviceCookie(token, { secure = false, maxAge = DEFAULT_DEVICE_MAX_AGE_SECONDS } = {}) {
+  const attributes = [
+    `${DEVICE_COOKIE_NAME}=${encodeURIComponent(token)}`,
     'Path=/',
     'HttpOnly',
     'SameSite=Strict',
@@ -137,6 +156,8 @@ function safeAccountData(value) {
     account: account ? {
       username: account.username,
       email: account.email,
+      deviceAccount: Boolean(account.deviceAccount),
+      credentialsConfigured: account.credentialsConfigured !== false,
       createdAt: account.createdAt,
     } : null,
     profile,
@@ -236,8 +257,56 @@ export function createAuthHttpHandler({
           registered.playerId || registered.profile?.playerId,
           sessionMetadata(request),
         );
-        response.setHeader('set-cookie', sessionCookie(issued.token, { secure: cookieSecure }));
+        const boundDevice = playerStore.bindDeviceCredential(
+          registered.playerId || registered.profile?.playerId,
+          deviceTokenFromRequest(request),
+          sessionMetadata(request),
+        );
+        response.setHeader('set-cookie', [
+          sessionCookie(issued.token, { secure: cookieSecure }),
+          deviceCookie(boundDevice.deviceToken, { secure: cookieSecure }),
+        ]);
         ok(response, 201, { authenticated: true, ...safeAccountData(registered) });
+        return true;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/auth/device') {
+        const body = await readJson(request);
+        if (!enforceRate(response, ['device', clientAddress(request)])) return true;
+        const currentToken = deviceTokenFromRequest(request);
+        let authenticated = playerStore.resolveDeviceCredential(currentToken, {
+          touch: true,
+          ...sessionMetadata(request),
+        });
+        let deviceToken = currentToken;
+        let created = false;
+        if (!authenticated && body.nickname != null && String(body.nickname).trim() !== '') {
+          authenticated = playerStore.createDeviceAccount({
+            nickname: body.nickname,
+            emblem: body.emblem,
+            ...sessionMetadata(request),
+          });
+          deviceToken = authenticated.deviceToken;
+          created = true;
+        }
+        if (!authenticated) {
+          ok(response, 200, { authenticated: false, deviceRecognized: false });
+          return true;
+        }
+        const issued = await playerStore.issueAuthSession(
+          authenticated.account?.playerId || authenticated.profile?.playerId,
+          sessionMetadata(request),
+        );
+        response.setHeader('set-cookie', [
+          sessionCookie(issued.token, { secure: cookieSecure }),
+          deviceCookie(deviceToken, { secure: cookieSecure }),
+        ]);
+        ok(response, created ? 201 : 200, {
+          authenticated: true,
+          deviceRecognized: true,
+          created,
+          ...safeAccountData(authenticated),
+        });
         return true;
       }
 
@@ -257,16 +326,29 @@ export function createAuthHttpHandler({
           authenticated.playerId || authenticated.profile?.playerId,
           sessionMetadata(request),
         );
-        response.setHeader('set-cookie', sessionCookie(issued.token, { secure: cookieSecure }));
+        const boundDevice = playerStore.bindDeviceCredential(
+          authenticated.playerId || authenticated.profile?.playerId,
+          deviceTokenFromRequest(request),
+          sessionMetadata(request),
+        );
+        response.setHeader('set-cookie', [
+          sessionCookie(issued.token, { secure: cookieSecure }),
+          deviceCookie(boundDevice.deviceToken, { secure: cookieSecure }),
+        ]);
         ok(response, 200, { authenticated: true, ...safeAccountData(authenticated) });
         return true;
       }
 
       if (request.method === 'POST' && url.pathname === '/api/auth/logout') {
         const token = authTokenFromRequest(request);
+        const deviceToken = deviceTokenFromRequest(request);
         const sessionHash = authSessionHash(token);
         if (token) await playerStore.logoutAuthSession(token);
-        response.setHeader('set-cookie', sessionCookie('', { secure: cookieSecure, maxAge: 0 }));
+        if (deviceToken) playerStore.revokeDeviceLogin(deviceToken);
+        response.setHeader('set-cookie', [
+          sessionCookie('', { secure: cookieSecure, maxAge: 0 }),
+          deviceCookie('', { secure: cookieSecure, maxAge: 0 }),
+        ]);
         await onSessionRevoked(sessionHash);
         ok(response, 200, { loggedOut: true });
         return true;
@@ -302,6 +384,21 @@ export function createAuthHttpHandler({
         });
         await onProfileUpdated(profile);
         ok(response, 200, { profile });
+        return true;
+      }
+
+      if (request.method === 'PATCH' && url.pathname === '/api/player/me/credentials') {
+        const session = await resolveRequestSession(request);
+        if (!session) {
+          fail(response, 401, 'AUTH_REQUIRED', '请先登录联机账号');
+          return true;
+        }
+        const body = await readJson(request);
+        const updated = await playerStore.configureAccountAccess(
+          session.playerId || session.profile?.playerId,
+          body,
+        );
+        ok(response, 200, safeAccountData(updated));
         return true;
       }
 
@@ -368,4 +465,7 @@ export function createAuthHttpHandler({
   };
 }
 
-export { sessionCookie as serializeAuthCookie };
+export {
+  sessionCookie as serializeAuthCookie,
+  deviceCookie as serializeDeviceCookie,
+};

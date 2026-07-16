@@ -62,6 +62,24 @@ function cookiePair(response) {
   return header.split(';', 1)[0];
 }
 
+function responseCookies(response) {
+  const headers = response.headers.getSetCookie?.()
+    || [response.headers.get('set-cookie') || ''];
+  return Object.fromEntries(headers
+    .map((header) => header.split(';', 1)[0])
+    .map((pair) => {
+      const index = pair.indexOf('=');
+      return index > 0 ? [pair.slice(0, index), pair.slice(index + 1)] : ['', ''];
+    })
+    .filter(([name]) => name));
+}
+
+function cookieHeader(cookies, ...names) {
+  return names.filter((name) => cookies[name] != null)
+    .map((name) => `${name}=${cookies[name]}`)
+    .join('; ');
+}
+
 async function requestJson(baseUrl, path, {
   method = 'GET',
   body,
@@ -228,6 +246,42 @@ test('PlayerStore supports registration, username/email login, sessions, profile
       store.confirmPasswordReset({ token: reset.token, newPassword: PASSWORD }),
       hasValidationCode('RESET_TOKEN_INVALID'),
     );
+  } finally {
+    store.close();
+  }
+});
+
+test('PlayerStore device account keeps one player and can enable cross-device credentials', async () => {
+  const store = createPlayerStore({
+    databasePath: ':memory:',
+    hashPasswordImpl: fastPasswordHash,
+    verifyPasswordImpl: fastPasswordVerify,
+  });
+  try {
+    const created = store.createDeviceAccount({ nickname: '一键侠客', userAgent: 'test-device-a' });
+    assert.equal(created.account.deviceAccount, true);
+    assert.equal(created.account.credentialsConfigured, false);
+    assert.equal(created.account.username, null);
+    assert.equal(created.account.email, null);
+
+    const recognized = store.resolveDeviceCredential(created.deviceToken, {
+      userAgent: 'test-device-a',
+    });
+    assert.equal(recognized.profile.playerId, created.profile.playerId);
+    assert.equal(recognized.profile.nickname, '一键侠客');
+
+    const configured = await store.configureAccountAccess(created.profile.playerId, {
+      email: 'quick.player@example.com',
+      newPassword: PASSWORD,
+    });
+    assert.equal(configured.account.credentialsConfigured, true);
+    assert.equal(configured.account.email, 'quick.player@example.com');
+
+    const crossDevice = await store.loginAccount({
+      login: 'QUICK.PLAYER@EXAMPLE.COM',
+      password: PASSWORD,
+    });
+    assert.equal(crossDevice.profile.playerId, created.profile.playerId);
   } finally {
     store.close();
   }
@@ -423,6 +477,72 @@ test('HTTP account flow uses an HttpOnly cookie and supports me/logout/profile/r
     });
     assert.equal(newPassword.response.status, 200);
     assert.equal(newPassword.payload.data.authenticated, true);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('HTTP device login creates once, auto logs in on the same device, and enables another device', async () => {
+  const runtime = await openServer();
+  try {
+    const unknown = await requestJson(runtime.baseUrl, '/api/auth/device', {
+      method: 'POST', body: {},
+    });
+    assert.equal(unknown.response.status, 200);
+    assert.equal(unknown.payload.data.authenticated, false);
+
+    const created = await requestJson(runtime.baseUrl, '/api/auth/device', {
+      method: 'POST', body: { nickname: '设备侠客' },
+    });
+    assert.equal(created.response.status, 201);
+    assert.equal(created.payload.data.authenticated, true);
+    assert.equal(created.payload.data.created, true);
+    assert.equal(created.payload.data.profile.nickname, '设备侠客');
+    assert.equal(created.payload.data.account.deviceAccount, true);
+    assert.equal(created.payload.data.account.credentialsConfigured, false);
+    const createdCookies = responseCookies(created.response);
+    assert.ok(createdCookies.qyj_session);
+    assert.ok(createdCookies.qyj_device);
+
+    const autoLogin = await requestJson(runtime.baseUrl, '/api/auth/device', {
+      method: 'POST',
+      body: {},
+      cookie: cookieHeader(createdCookies, 'qyj_device'),
+    });
+    assert.equal(autoLogin.response.status, 200);
+    assert.equal(autoLogin.payload.data.authenticated, true);
+    assert.equal(autoLogin.payload.data.created, false);
+    assert.equal(autoLogin.payload.data.profile.playerId, created.payload.data.profile.playerId);
+    const autoCookies = responseCookies(autoLogin.response);
+
+    const configured = await requestJson(runtime.baseUrl, '/api/player/me/credentials', {
+      method: 'PATCH',
+      cookie: cookieHeader(autoCookies, 'qyj_session'),
+      body: { email: 'device.player@example.com', newPassword: PASSWORD },
+    });
+    assert.equal(configured.response.status, 200);
+    assert.equal(configured.payload.data.account.credentialsConfigured, true);
+    assert.equal(configured.payload.data.account.email, 'device.player@example.com');
+
+    const otherDevice = await requestJson(runtime.baseUrl, '/api/auth/login', {
+      method: 'POST',
+      body: { identifier: 'DEVICE.PLAYER@EXAMPLE.COM', password: PASSWORD },
+    });
+    assert.equal(otherDevice.response.status, 200);
+    assert.equal(otherDevice.payload.data.profile.playerId, created.payload.data.profile.playerId);
+
+    const loggedOut = await requestJson(runtime.baseUrl, '/api/auth/logout', {
+      method: 'POST',
+      cookie: cookieHeader(autoCookies, 'qyj_session', 'qyj_device'),
+    });
+    assert.equal(loggedOut.response.status, 200);
+    const afterLogout = await requestJson(runtime.baseUrl, '/api/auth/device', {
+      method: 'POST',
+      body: {},
+      cookie: cookieHeader(createdCookies, 'qyj_device'),
+    });
+    assert.equal(afterLogout.payload.data.authenticated, false,
+      '显式退出必须撤销本设备自动登录凭证');
   } finally {
     await runtime.server.close();
   }

@@ -33,10 +33,12 @@ assert.equal(resolveAccountApiOrigin({
 const calls = [];
 const replies = [
   response(200, { ok: true, data: { authenticated: true } }),
+  response(201, { ok: true, data: { authenticated: true, created: true } }),
   response(201, { ok: true, data: { username: 'hero' } }),
   response(200, { ok: true, data: { username: 'hero' } }),
   response(204),
   response(200, { ok: true, data: { nickname: '青州侠' } }),
+  response(200, { ok: true, data: { email: 'hero@example.test' } }),
   response(200, { ok: true, data: { items: [], nextCursor: null } }),
   response(202, { ok: true, data: { accepted: true } }),
   response(200, { ok: true, data: { reset: true } }),
@@ -52,10 +54,14 @@ const client = createAccountClient({
 assert.deepEqual(await client.getSession(), {
   ok: true, data: { authenticated: true }, error: null,
 });
+await client.deviceLogin({ nickname: '一键侠' });
 await client.register({ username: 'hero', email: 'hero@example.test', password: 'Secret!123' });
 await client.login({ identifier: 'hero@example.test', password: 'Secret!123' });
 assert.deepEqual(await client.logout(), { ok: true, data: null, error: null });
 await client.updateProfile({ nickname: '青州侠', emblem: '侠' });
+await client.updateCredentials({
+  email: 'hero@example.test', currentPassword: 'Secret!123', newPassword: 'NewSecret!456',
+});
 await client.getHandHistory({ limit: 10, cursor: 42 });
 await client.requestPasswordReset('hero@example.test');
 await client.confirmPasswordReset('reset-token', 'NewSecret!456');
@@ -68,6 +74,10 @@ assert.deepEqual(calls.map(({ url, init }) => ({
 })), [
   { path: '/api/auth/me', method: 'GET', credentials: 'include', body: null },
   {
+    path: '/api/auth/device', method: 'POST', credentials: 'include',
+    body: { nickname: '一键侠' },
+  },
+  {
     path: '/api/auth/register', method: 'POST', credentials: 'include',
     body: { username: 'hero', email: 'hero@example.test', password: 'Secret!123' },
   },
@@ -79,6 +89,12 @@ assert.deepEqual(calls.map(({ url, init }) => ({
   {
     path: '/api/player/me', method: 'PATCH', credentials: 'include',
     body: { nickname: '青州侠', emblem: '侠' },
+  },
+  {
+    path: '/api/player/me/credentials', method: 'PATCH', credentials: 'include',
+    body: {
+      email: 'hero@example.test', currentPassword: 'Secret!123', newPassword: 'NewSecret!456',
+    },
   },
   { path: '/api/player/me/hands?limit=10&cursor=42', method: 'GET', credentials: 'include', body: null },
   {

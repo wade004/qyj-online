@@ -100,6 +100,7 @@ export class OnlineSession {
     this.retryDelays = [...retryDelays];
     this.retryAttempt = 0;
     this.reconnectTimer = null;
+    this.recoveryReadyTimer = null;
     this.battleLeaveTimer = null;
     this.pendingBattleLeave = null;
     this.transportOpen = false;
@@ -114,6 +115,7 @@ export class OnlineSession {
     this.account = null;
     this.authenticated = false;
     this.authPending = false;
+    this.deviceAutoLoginAttempted = false;
     this.initialResetToken = consumeResetTokenFromLocation();
     this.pendingPlayerProfile = null;
     this.profileUpdatePending = null;
@@ -243,6 +245,23 @@ export class OnlineSession {
     this.reconnectTimer = null;
   }
 
+  clearRecoveryReadyTimer() {
+    if (this.recoveryReadyTimer != null) clearTimeout(this.recoveryReadyTimer);
+    this.recoveryReadyTimer = null;
+  }
+
+  startRecoveryReadyWatchdog() {
+    this.clearRecoveryReadyTimer();
+    this.recoveryReadyTimer = setTimeout(() => {
+      this.recoveryReadyTimer = null;
+      if (this.destroyed || !this.recovering || !this.transportOpen
+        || this.state.screen !== 'battle') return;
+      // Older servers do not emit resumeReady. Once the authoritative battle
+      // snapshot is present, never leave the player behind a permanent mask.
+      this.markConnected({ recovered: true });
+    }, 3000);
+  }
+
   clearBattleLeaveTimer() {
     if (this.battleLeaveTimer != null) clearTimeout(this.battleLeaveTimer);
     this.battleLeaveTimer = null;
@@ -344,6 +363,7 @@ export class OnlineSession {
 
   markConnected({ recovered = false } = {}) {
     this.clearReconnectTimer();
+    this.clearRecoveryReadyTimer();
     this.retryAttempt = 0;
     this.recovering = false;
     this.resumeNeedsAwait = false;
@@ -401,6 +421,11 @@ export class OnlineSession {
       return;
     }
     if (!authenticated) {
+      if (!this.deviceAutoLoginAttempted) {
+        this.deviceAutoLoginAttempted = true;
+        void this.tryDeviceAutoLogin();
+        return;
+      }
       this.clearPendingBattleLeave();
       this.authenticated = false;
       this.account = null;
@@ -410,7 +435,7 @@ export class OnlineSession {
       this.publish({
         screen: 'auth',
         data: {
-          authView: this.initialResetToken ? 'reset-confirm' : 'login',
+          authView: this.initialResetToken ? 'reset-confirm' : 'quick',
           resetToken: this.initialResetToken,
         },
         account: null,
@@ -493,6 +518,12 @@ export class OnlineSession {
       this.handleResumeResult(data);
       return;
     }
+    if (ev === 'resumeReady') {
+      if (this.recovering && this.state.screen === 'battle') {
+        this.markConnected({ recovered: true });
+      }
+      return;
+    }
 
     // Backward-compatible promotion for servers that send screen state before
     // the session envelope on a brand-new connection.
@@ -521,7 +552,12 @@ export class OnlineSession {
       if (this.state.screen === 'pick') {
         this.publish({
           screen: 'pick',
-          data: { ...this.state.data, members: data.members || [], room: data },
+          data: {
+            ...this.state.data,
+            members: data.members || [],
+            chatMessages: data.chatMessages || this.state.data?.chatMessages || [],
+            room: data,
+          },
           error: null,
         });
         return;
@@ -538,7 +574,7 @@ export class OnlineSession {
     if (ev === 'pick') {
       if (this.state.screen === 'room' || this.state.screen === 'pick' || this.recovering) {
         const recovered = this.recovering;
-        const members = this.state.data?.members || this.state.data?.room?.members;
+        const members = data.members || this.state.data?.members || this.state.data?.room?.members;
         this.publish({
           screen: 'pick',
           data: members ? { ...data, members } : data,
@@ -577,10 +613,19 @@ export class OnlineSession {
         );
       }
       this.publish({ screen: 'battle', data: startData, battle: this.battle, error: null });
+      if (this.recovering) this.startRecoveryReadyWatchdog();
       return;
     }
     if (ev === 'toast') {
       this.pushNotice(data.msg, { kind: 'info', key: String(data.msg || '') });
+      return;
+    }
+    if (ev === 'chat' && ['room', 'pick'].includes(this.state.screen)) {
+      const current = Array.isArray(this.state.data?.chatMessages)
+        ? this.state.data.chatMessages : [];
+      const duplicate = data.id && current.some((message) => message?.id === data.id);
+      const chatMessages = duplicate ? current : [...current, data].slice(-60);
+      this.publish({ data: { ...this.state.data, chatMessages }, error: null });
       return;
     }
     if (ev === 'error') {
@@ -702,8 +747,8 @@ export class OnlineSession {
   }
 
   selectAuthView(view = 'login', patch = {}) {
-    const allowed = new Set(['login', 'register', 'reset-request', 'reset-confirm']);
-    const authView = allowed.has(view) ? view : 'login';
+    const allowed = new Set(['quick', 'login', 'register', 'reset-request', 'reset-confirm']);
+    const authView = allowed.has(view) ? view : 'quick';
     const currentData = this.state.screen === 'auth' && this.state.data
       && typeof this.state.data === 'object' ? this.state.data : {};
     this.publish({
@@ -744,6 +789,69 @@ export class OnlineSession {
       this.client.close?.();
       this.client.connect?.();
     }
+  }
+
+  async tryDeviceAutoLogin() {
+    if (this.destroyed) return false;
+    if (typeof this.accountClient?.deviceLogin !== 'function') {
+      this.publish({
+        screen: 'auth',
+        data: { authView: 'quick' },
+        authPending: false,
+        error: null,
+        writeBlocked: false,
+      });
+      return false;
+    }
+    this.authPending = true;
+    this.showConnecting('正在识别本设备…', {
+      authPending: true,
+      connection: 'open',
+      recovering: false,
+    });
+    let result;
+    try {
+      result = await this.accountClient.deviceLogin({});
+    } catch (error) {
+      result = {
+        ok: false,
+        error: { code: 'NETWORK_ERROR', message: error?.message || '设备识别失败，请稍后重试' },
+      };
+    }
+    if (this.destroyed) return false;
+    if (result?.ok && result.data?.authenticated) {
+      this.reconnectAfterAuthentication('已识别本设备，正在自动登录…');
+      return true;
+    }
+    this.authPending = false;
+    this.authenticated = false;
+    this.account = null;
+    this.publish({
+      screen: 'auth',
+      data: { authView: 'quick' },
+      account: null,
+      authenticated: false,
+      authPending: false,
+      connection: 'open',
+      error: result?.ok ? null : result?.error,
+      recovering: false,
+      writeBlocked: false,
+      battle: null,
+    });
+    return false;
+  }
+
+  async quickLogin({ nickname } = {}) {
+    if (this.authPending) return { ok: false, error: { code: 'AUTH_PENDING', message: '正在提交，请稍候' } };
+    this.deviceAutoLoginAttempted = true;
+    this.authPending = true;
+    this.publish({ authPending: true, error: null });
+    const result = await this.accountClient.deviceLogin({ nickname });
+    if (!result?.ok || !result.data?.authenticated) {
+      return this.publishAuthFailure(result, '设备快捷登录失败，请稍后重试');
+    }
+    this.reconnectAfterAuthentication('设备账号已建立，正在进入联机大厅…');
+    return result;
   }
 
   async loginAccount({ identifier, password } = {}) {
@@ -817,6 +925,30 @@ export class OnlineSession {
     this.battle = null;
     this.reconnectAfterAuthentication('已退出登录，正在返回账号入口…');
     return true;
+  }
+
+  async updateAccountCredentials(payload = {}) {
+    if (!this.state.authenticated || this.authPending) {
+      return { ok: false, error: { code: 'AUTH_PENDING', message: '当前无法修改登录资料' } };
+    }
+    this.authPending = true;
+    this.publish({ authPending: true, error: null });
+    const result = await this.accountClient.updateCredentials(payload);
+    this.authPending = false;
+    if (!result?.ok) {
+      this.publish({ authPending: false, error: result?.error || null });
+      return result;
+    }
+    if (result.data?.account) {
+      this.account = { ...result.data.account };
+      this.publish({ account: this.account, authPending: false, error: null });
+    } else {
+      this.publish({ authPending: false, error: null });
+    }
+    this.pushNotice('跨设备登录资料已保存', {
+      kind: 'success', key: 'account-credentials-saved',
+    });
+    return result;
   }
 
   getHandHistory(options = {}) {
@@ -918,8 +1050,25 @@ export class OnlineSession {
   joinTeam(teamId) { return this.send('join', { teamId: Number(teamId) }); }
   rejoinGame(teamId) {
     if (this.state.writeBlocked || this.state.connection !== 'open') return false;
-    this.showConnecting('正在重新接管旧牌局…');
-    return this.sendObject({ cmd: 'rejoinGame', teamId: Number(teamId) });
+    this.recovering = true;
+    this.showConnecting('正在重新接管旧牌局…', {
+      connection: 'reconnecting',
+      recovering: true,
+      writeBlocked: true,
+    });
+    const sent = this.sendObject({ cmd: 'rejoinGame', teamId: Number(teamId) });
+    if (!sent) {
+      this.recovering = false;
+      this.publish({
+        screen: 'lobby',
+        connection: 'open',
+        recovering: false,
+        writeBlocked: false,
+        error: { code: 'SEND_FAILED', message: '重新接管请求发送失败，请重试' },
+      });
+      return false;
+    }
+    return true;
   }
   rename(name) { return this.send('rename', { name: String(name || '').trim() }); }
   leaveTeam() {
@@ -946,6 +1095,11 @@ export class OnlineSession {
   startPick() { return this.send('startPick'); }
   pickHero(heroId) { return this.send('pick', { heroId }); }
   startGame() { return this.send('startGame'); }
+  sendRoomChat(text) {
+    const value = String(text || '').trim();
+    if (!value || [...value].length > 80) return false;
+    return this.send('chat', { text: value });
+  }
   backToRoom() {
     if (this.state.writeBlocked || this.state.connection !== 'open') return false;
     this.battle?.destroy();
@@ -962,6 +1116,7 @@ export class OnlineSession {
     if (this.destroyed) return;
     this.destroyed = true;
     this.clearReconnectTimer();
+    this.clearRecoveryReadyTimer();
     this.clearPendingBattleLeave();
     this.settleProfileUpdate({
       ok: false,

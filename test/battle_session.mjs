@@ -431,6 +431,36 @@ fakeClient.message({
 assert(online.getState().screen === 'room' && !online.getState().writeBlocked,
   '返回房间收到权威状态后解除写锁与遮罩');
 
+assert(online.rejoinGame(77)
+  && fakeClient.sent.at(-1)?.cmd === 'rejoinGame'
+  && online.getState().recovering
+  && online.getState().writeBlocked,
+'大厅重新接管旧牌局必须进入可完成的恢复状态');
+fakeClient.message({ ev: 'gameStart', a: startData });
+fakeClient.message({
+  ev: 'sync', a: {},
+  s: {
+    round: 3, street: 'preflop', pot: 30, waitingIdx: null, revealed: 0,
+    board: [],
+    players: heroIds.map((_, index) => playerSnapshot(index + 1)),
+    potDisplay: [{ label: '当前血池', amount: 30, kind: 'main' }],
+  },
+});
+fakeClient.message({ ev: 'resumeReady', a: { teamId: 77, seat: 1 } });
+assert(online.getState().screen === 'battle'
+  && online.getState().connection === 'open'
+  && !online.getState().recovering
+  && !online.getState().writeBlocked,
+'重新接管收到完整恢复快照后必须解除遮罩与写锁');
+assert(online.backToRoom(), '恢复完成后仍可正常返回房间');
+fakeClient.message({
+  ev: 'team',
+  a: {
+    phase: 'lobby', yourName: '契约玩家', isOwner: true,
+    members: [{ name: '契约玩家', isYou: true, isOwner: true, connection: 'online' }],
+  },
+});
+
 fakeClient.listener?.({ type: 'close', intentional: false });
 online.reconnect();
   fakeClient.message({ ev: 'session', a: { resumeToken: 'token-4', resumed: false, resumeGraceMs: 15000, authenticated: true } });

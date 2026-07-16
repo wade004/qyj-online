@@ -20,13 +20,15 @@ export const RECENT_MATCH_LIMIT = 10;
 export const POKER_STATS_WINDOW_DAYS = 30;
 export const POKER_STATS_MAX_HANDS = 200;
 export const POKER_STATS_RANGE_LABEL = '近30天 · 最近200手';
-export const PLAYER_SCHEMA_VERSION = 6;
+export const PLAYER_SCHEMA_VERSION = 8;
+export const DEFAULT_PLAYER_AVATAR_COUNT = 20;
 
 export const AUTH_SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 export const AUTH_SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
 export const AUTH_SESSION_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
 export const PASSWORD_RESET_TTL_MS = 15 * 60 * 1000;
 export const MAX_AUTH_SESSIONS_PER_PLAYER = 5;
+export const DEVICE_LOGIN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
 export const PASSWORD_SCRYPT_OPTIONS = Object.freeze({
   N: 2 ** 17,
   r: 8,
@@ -355,6 +357,11 @@ function randomShortId(randomBytesImpl) {
   return randomBytesImpl(4).toString('hex').toUpperCase();
 }
 
+export function defaultAvatarIdForPlayer(playerId) {
+  const digest = createHash('sha256').update(String(playerId || ''), 'utf8').digest();
+  return 1 + (digest.readUInt32BE(0) % DEFAULT_PLAYER_AVATAR_COUNT);
+}
+
 function randomOpaqueToken(randomBytesImpl) {
   return randomBytesImpl(32).toString('base64url');
 }
@@ -380,6 +387,7 @@ function databaseRowToProfile(row, recentMatches, pokerStats) {
     shortId: row.short_id,
     nickname: row.nickname,
     emblem: row.emblem,
+    avatarId: Number(row.avatar_id) || defaultAvatarIdForPlayer(row.player_id),
     createdAt: toIso(row.created_at),
     lastSeenAt: toIso(row.last_seen_at),
     stats: {
@@ -396,10 +404,14 @@ function databaseRowToProfile(row, recentMatches, pokerStats) {
 
 function accountRowToDto(row) {
   if (!row) return null;
+  const deviceAccount = row.account_origin === 'device';
+  const credentialsConfigured = Number(row.login_enabled) === 1;
   return {
     playerId: row.player_id,
-    username: row.username,
-    email: row.email,
+    username: deviceAccount ? null : row.username,
+    email: credentialsConfigured ? row.email : null,
+    deviceAccount,
+    credentialsConfigured,
     status: row.status,
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
@@ -431,6 +443,7 @@ const BASE_SCHEMA_SQL = `
     guest_hash TEXT NOT NULL UNIQUE,
     nickname TEXT NOT NULL,
     emblem TEXT NOT NULL,
+    avatar_id INTEGER NOT NULL DEFAULT 1 CHECK (avatar_id BETWEEN 1 AND 20),
     created_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
     matches INTEGER NOT NULL DEFAULT 0 CHECK (matches >= 0),
@@ -494,6 +507,9 @@ const AUTH_SCHEMA_SQL = `
     email_key TEXT NOT NULL UNIQUE
       CHECK (length(email_key) BETWEEN 3 AND 254),
     password_hash TEXT NOT NULL,
+    login_enabled INTEGER NOT NULL DEFAULT 1 CHECK (login_enabled IN (0, 1)),
+    account_origin TEXT NOT NULL DEFAULT 'standard'
+      CHECK (account_origin IN ('standard', 'device')),
     status TEXT NOT NULL DEFAULT 'active'
       CHECK (status IN ('active', 'disabled')),
     auth_version INTEGER NOT NULL DEFAULT 1 CHECK (auth_version > 0),
@@ -518,6 +534,20 @@ const AUTH_SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_player_auth_sessions_active
     ON player_auth_sessions(player_id, revoked_at, expires_at, last_seen_at);
+
+  CREATE TABLE IF NOT EXISTS player_device_credentials (
+    device_hash TEXT PRIMARY KEY CHECK (length(device_hash) = 64),
+    player_id TEXT NOT NULL REFERENCES player_accounts(player_id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    user_agent_hash TEXT,
+    CHECK (expires_at > created_at)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_player_device_credentials_player
+    ON player_device_credentials(player_id, revoked_at, expires_at, last_used_at);
 
   CREATE TABLE IF NOT EXISTS password_reset_tokens (
     token_hash TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
@@ -584,6 +614,10 @@ function tableExists(db, name) {
     FROM sqlite_master
     WHERE type = 'table' AND name = ?
   `).get(name));
+}
+
+function tableHasColumn(db, table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
 }
 
 function migrateExistingDatabaseToV3(db) {
@@ -707,6 +741,26 @@ function migrateDatabase(db) {
       db.exec(POKER_SCHEMA_SQL);
     }
     db.exec(AUTH_SCHEMA_SQL);
+    if (!tableHasColumn(db, 'player_accounts', 'login_enabled')) {
+      db.exec(`ALTER TABLE player_accounts
+        ADD COLUMN login_enabled INTEGER NOT NULL DEFAULT 1 CHECK (login_enabled IN (0, 1))`);
+    }
+    if (!tableHasColumn(db, 'player_accounts', 'account_origin')) {
+      db.exec(`ALTER TABLE player_accounts
+        ADD COLUMN account_origin TEXT NOT NULL DEFAULT 'standard'
+        CHECK (account_origin IN ('standard', 'device'))`);
+    }
+    if (!tableHasColumn(db, 'players', 'avatar_id')) {
+      db.exec(`ALTER TABLE players
+        ADD COLUMN avatar_id INTEGER NOT NULL DEFAULT 1 CHECK (avatar_id BETWEEN 1 AND 20)`);
+    }
+    if (version < 8) {
+      const rows = db.prepare('SELECT player_id FROM players').all();
+      const setAvatar = db.prepare('UPDATE players SET avatar_id = ? WHERE player_id = ?');
+      for (const row of rows) {
+        setAvatar.run(defaultAvatarIdForPlayer(row.player_id), row.player_id);
+      }
+    }
     db.exec(HAND_HISTORY_SCHEMA_SQL);
     if (version < 5) {
       db.exec(`
@@ -1036,8 +1090,8 @@ export class PlayerStore {
     );
     this.insertPlayer = this.db.prepare(`
       INSERT INTO players (
-        player_id, short_id, guest_hash, nickname, emblem, created_at, last_seen_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        player_id, short_id, guest_hash, nickname, emblem, avatar_id, created_at, last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.touchPlayer = this.db.prepare(
       'UPDATE players SET last_seen_at = ? WHERE player_id = ?',
@@ -1146,13 +1200,38 @@ export class PlayerStore {
     this.insertAccount = this.db.prepare(`
       INSERT INTO player_accounts (
         player_id, username, username_key, email, email_key, password_hash,
+        login_enabled, account_origin,
         status, auth_version, created_at, updated_at, password_changed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)
+    `);
+    this.updateAccountCredentials = this.db.prepare(`
+      UPDATE player_accounts
+      SET email = ?, email_key = ?, password_hash = ?, login_enabled = 1,
+          updated_at = ?, password_changed_at = ?
+      WHERE player_id = ? AND password_hash = ? AND status = 'active'
     `);
     this.updateAccountLastLogin = this.db.prepare(`
       UPDATE player_accounts
       SET last_login_at = ?, updated_at = ?
       WHERE player_id = ? AND password_hash = ? AND status = 'active'
+    `);
+    this.findDeviceCredential = this.db.prepare(
+      'SELECT * FROM player_device_credentials WHERE device_hash = ?',
+    );
+    this.insertDeviceCredential = this.db.prepare(`
+      INSERT INTO player_device_credentials (
+        device_hash, player_id, created_at, last_used_at, expires_at, user_agent_hash
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    this.touchDeviceCredential = this.db.prepare(`
+      UPDATE player_device_credentials
+      SET last_used_at = ?, user_agent_hash = COALESCE(?, user_agent_hash)
+      WHERE device_hash = ? AND revoked_at IS NULL AND expires_at > ?
+    `);
+    this.revokeDeviceCredential = this.db.prepare(`
+      UPDATE player_device_credentials
+      SET revoked_at = ?
+      WHERE device_hash = ? AND revoked_at IS NULL
     `);
     this.insertAuthSession = this.db.prepare(`
       INSERT INTO player_auth_sessions (
@@ -1272,7 +1351,8 @@ export class PlayerStore {
       const shortId = randomShortId(this.randomBytes);
       try {
         this.insertPlayer.run(
-          playerId, shortId, guestHash, initialNickname, initialEmblem, now, now,
+          playerId, shortId, guestHash, initialNickname, initialEmblem,
+          defaultAvatarIdForPlayer(playerId), now, now,
         );
         return {
           created: true,
@@ -1405,7 +1485,8 @@ export class PlayerStore {
           const shortId = randomShortId(this.randomBytes);
           try {
             this.insertPlayer.run(
-              playerId, shortId, guestHash, initialNickname, initialEmblem, now, now,
+              playerId, shortId, guestHash, initialNickname, initialEmblem,
+              defaultAvatarIdForPlayer(playerId), now, now,
             );
             inserted = true;
           } catch (error) {
@@ -1423,6 +1504,8 @@ export class PlayerStore {
         email,
         emailKey,
         passwordHash,
+        1,
+        'standard',
         now,
         now,
         now,
@@ -1447,6 +1530,224 @@ export class PlayerStore {
     });
   }
 
+  createDeviceAccount({ nickname, emblem, userAgent } = {}) {
+    this.assertOpen();
+    const initialNickname = normalizeNickname(nickname);
+    const initialEmblem = emblem == null ? PLAYER_EMBLEMS[0] : normalizeEmblem(emblem);
+    const now = this.currentTime();
+
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const playerId = randomPlayerId(this.randomBytes);
+      const shortId = randomShortId(this.randomBytes);
+      const internalUsername = `device_${this.randomBytes(8).toString('base64url')}`;
+      const internalEmail = `${internalUsername}@device.invalid`;
+      const passwordMarker = `device$${this.randomBytes(32).toString('hex')}`;
+      const guestHash = guestFingerprint(randomInternalGuestId(this.randomBytes));
+      const deviceToken = randomOpaqueToken(this.randomBytes);
+      const deviceHash = authTokenFingerprint(deviceToken);
+      const expiresAt = now + DEVICE_LOGIN_LIFETIME_MS;
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        this.insertPlayer.run(
+          playerId, shortId, guestHash, initialNickname, initialEmblem,
+          defaultAvatarIdForPlayer(playerId), now, now,
+        );
+        this.insertAccount.run(
+          playerId,
+          internalUsername,
+          internalUsername.toLowerCase(),
+          internalEmail,
+          internalEmail.toLowerCase(),
+          passwordMarker,
+          0,
+          'device',
+          now,
+          now,
+          now,
+        );
+        this.insertDeviceCredential.run(
+          deviceHash,
+          playerId,
+          now,
+          now,
+          expiresAt,
+          optionalMetadataFingerprint(userAgent),
+        );
+        this.db.exec('COMMIT');
+        return {
+          deviceToken,
+          account: this.getAccount(playerId),
+          profile: this.getProfile(playerId),
+          created: true,
+        };
+      } catch (error) {
+        try { this.db.exec('ROLLBACK'); } catch { /* preserve allocation error */ }
+        if (attempt === 7) throw error;
+      }
+    }
+    throw new Error('Unable to allocate device account');
+  }
+
+  resolveDeviceCredential(token, { touch = true, userAgent } = {}) {
+    this.assertOpen();
+    const deviceHash = fingerprintOpaqueToken(token);
+    if (!deviceHash) return null;
+    const row = this.findDeviceCredential.get(deviceHash);
+    if (!row) return null;
+    const now = this.currentTime();
+    const account = this.findAccountByPlayer.get(row.player_id);
+    const invalid = row.revoked_at != null || row.expires_at <= now
+      || !account || account.status !== 'active';
+    if (invalid) {
+      if (row.revoked_at == null) this.revokeDeviceCredential.run(now, deviceHash);
+      return null;
+    }
+    if (touch) {
+      this.touchDeviceCredential.run(
+        now,
+        optionalMetadataFingerprint(userAgent),
+        deviceHash,
+        now,
+      );
+    }
+    this.touchPlayer.run(now, row.player_id);
+    return {
+      account: accountRowToDto(account),
+      profile: this.getProfile(row.player_id),
+      deviceHash,
+    };
+  }
+
+  bindDeviceCredential(playerId, token, { userAgent } = {}) {
+    this.assertOpen();
+    const normalizedPlayerId = normalizePlayerId(playerId, 'PLAYER_NOT_IDENTIFIED');
+    const existingHash = fingerprintOpaqueToken(token);
+    const existing = existingHash ? this.findDeviceCredential.get(existingHash) : null;
+    const now = this.currentTime();
+    if (existing?.player_id === normalizedPlayerId
+      && existing.revoked_at == null && existing.expires_at > now) {
+      this.touchDeviceCredential.run(
+        now,
+        optionalMetadataFingerprint(userAgent),
+        existingHash,
+        now,
+      );
+      return { deviceToken: token, created: false };
+    }
+    if (existing && existing.revoked_at == null) {
+      this.revokeDeviceCredential.run(now, existingHash);
+    }
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const deviceToken = randomOpaqueToken(this.randomBytes);
+      const deviceHash = authTokenFingerprint(deviceToken);
+      try {
+        this.insertDeviceCredential.run(
+          deviceHash,
+          normalizedPlayerId,
+          now,
+          now,
+          now + DEVICE_LOGIN_LIFETIME_MS,
+          optionalMetadataFingerprint(userAgent),
+        );
+        return { deviceToken, created: true };
+      } catch (error) {
+        if (attempt === 7) throw error;
+      }
+    }
+    throw new Error('Unable to allocate device credential');
+  }
+
+  revokeDeviceLogin(token) {
+    this.assertOpen();
+    const deviceHash = fingerprintOpaqueToken(token);
+    if (!deviceHash) return false;
+    return this.revokeDeviceCredential.run(this.currentTime(), deviceHash).changes === 1;
+  }
+
+  async configureAccountAccess(playerId, {
+    email: rawEmail,
+    newPassword: rawNewPassword,
+    password: passwordAlias,
+    currentPassword,
+  } = {}) {
+    this.assertOpen();
+    const normalizedPlayerId = normalizePlayerId(playerId, 'PLAYER_NOT_IDENTIFIED');
+    const snapshot = this.findAccountByPlayer.get(normalizedPlayerId);
+    if (!snapshot || snapshot.status !== 'active') {
+      validationError('PLAYER_NOT_IDENTIFIED', '账号不存在');
+    }
+    const initialSetup = Number(snapshot.login_enabled) !== 1;
+    const wantsEmail = rawEmail != null && String(rawEmail).trim() !== '';
+    const suppliedPassword = rawNewPassword ?? passwordAlias;
+    const wantsPassword = suppliedPassword != null && suppliedPassword !== '';
+    if (!wantsEmail && !wantsPassword) {
+      validationError('INVALID_PROFILE', '请填写要更新的邮箱或密码');
+    }
+    if (initialSetup && (!wantsEmail || !wantsPassword)) {
+      validationError('CREDENTIALS_INCOMPLETE', '首次设置跨设备登录需要同时填写邮箱和密码');
+    }
+
+    const normalizedEmail = wantsEmail
+      ? normalizeEmail(rawEmail)
+      : { email: snapshot.email, key: snapshot.email_key };
+    const duplicateEmail = this.findAccountByEmail.get(normalizedEmail.key);
+    if (duplicateEmail && duplicateEmail.player_id !== normalizedPlayerId) {
+      validationError('EMAIL_TAKEN', '邮箱已被使用');
+    }
+
+    if (!initialSetup) {
+      let normalizedCurrent;
+      try {
+        normalizedCurrent = normalizePassword(currentPassword, 'INVALID_CREDENTIALS');
+      } catch (error) {
+        if (error instanceof PlayerValidationError) {
+          await this.consumeUnknownAccountPasswordWork('invalid-credential-placeholder');
+        }
+        throw error;
+      }
+      const currentValid = await this.verifyPasswordImpl(
+        normalizedCurrent,
+        snapshot.password_hash,
+      );
+      if (!currentValid) validationError('INVALID_CREDENTIALS', '当前密码错误');
+    }
+
+    const passwordHash = wantsPassword
+      ? await this.hashPasswordImpl(normalizePassword(suppliedPassword), {
+        randomBytesImpl: this.randomBytes,
+      })
+      : snapshot.password_hash;
+    this.assertOpen();
+    const now = this.currentTime();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.findAccountByPlayer.get(normalizedPlayerId);
+      if (!current || current.status !== 'active'
+        || current.password_hash !== snapshot.password_hash) {
+        validationError('ACCOUNT_CHANGED', '账号资料已变化，请重新操作');
+      }
+      const concurrentEmail = this.findAccountByEmail.get(normalizedEmail.key);
+      if (concurrentEmail && concurrentEmail.player_id !== normalizedPlayerId) {
+        validationError('EMAIL_TAKEN', '邮箱已被使用');
+      }
+      const write = this.updateAccountCredentials.run(
+        normalizedEmail.email,
+        normalizedEmail.key,
+        passwordHash,
+        now,
+        wantsPassword ? now : current.password_changed_at,
+        normalizedPlayerId,
+        current.password_hash,
+      );
+      if (write.changes !== 1) validationError('ACCOUNT_CHANGED', '账号资料已变化，请重新操作');
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* preserve credential update error */ }
+      throw error;
+    }
+    return this.getAccountBundle(normalizedPlayerId);
+  }
+
   async authenticateAccount({ login, identifier, password: rawPassword } = {}) {
     this.assertOpen();
     const normalizedLogin = normalizeLogin(login ?? identifier);
@@ -1463,6 +1764,10 @@ export class PlayerStore {
       ? this.findAccountByEmail.get(normalizedLogin.key)
       : this.findAccountByUsername.get(normalizedLogin.key);
     if (!snapshot) {
+      await this.consumeUnknownAccountPasswordWork(password);
+      validationError('INVALID_CREDENTIALS', '用户名或密码错误');
+    }
+    if (Number(snapshot.login_enabled) !== 1) {
       await this.consumeUnknownAccountPasswordWork(password);
       validationError('INVALID_CREDENTIALS', '用户名或密码错误');
     }
