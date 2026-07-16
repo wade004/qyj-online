@@ -328,6 +328,42 @@ test('联机房间：6/9 人横屏座位不重叠、默认头像可用且房间�
   }
 });
 
+test('房主可移出离线保留成员并立即继续开局', async ({ browser }) => {
+  const owner = await createUser(browser, { width: 932, height: 430 });
+  const member = await createUser(browser, { width: 932, height: 430 });
+  let memberClosed = false;
+  try {
+    await enterApp(owner.page);
+    await register(owner.page, account('kick_owner'));
+    await enterApp(member.page);
+    await register(member.page, account('kick_member'));
+
+    await createRoom(owner.page, 6);
+    const joinButton = member.page.locator('[data-testid^="h5-join-team-"]').first();
+    await expect(joinButton).toBeVisible();
+    await joinButton.click();
+    await expect(owner.page.getByTestId('h5-room-member')).toHaveCount(2);
+    await expect(owner.page.getByTestId('h5-kick-member')).toHaveCount(1);
+
+    await member.context.close();
+    memberClosed = true;
+    await expect(owner.page.getByTestId('h5-kick-member')).toHaveClass(/is-offline/);
+    await expect(owner.page.getByTestId('h5-start-pick')).toBeDisabled();
+
+    await owner.page.getByTestId('h5-kick-member').click();
+    await expect(owner.page.getByText('移出后将立即释放席位')).toBeVisible();
+    await owner.page.getByTestId('h5-kick-member-confirm').click();
+    await expect(owner.page.getByTestId('h5-room-member')).toHaveCount(1);
+    await expect(owner.page.getByTestId('h5-start-pick')).toBeEnabled();
+    await owner.page.getByTestId('h5-start-pick').click();
+    await expect(owner.page.getByTestId('h5-online-pick')).toBeVisible();
+    expect(owner.errors).toEqual([]);
+  } finally {
+    if (!memberClosed) await member.context.close();
+    await owner.context.close();
+  }
+});
+
 function collectFrames(page) {
   const frames = [];
   page.on('websocket', (socket) => {

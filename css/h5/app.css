@@ -8491,6 +8491,26 @@ body.h5-is-blocked #h5-stage {
   box-shadow: 0 3px 9px rgba(0, 0, 0, .38), inset 0 0 0 2px rgba(15, 10, 7, .8);
 }
 
+.h5-room-seat__stats-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.h5-room-seat__avatar-wrap,
+.h5-room-seat__identity,
+.h5-room-seat__emblem {
+  z-index: 2;
+  pointer-events: none;
+}
+
 .h5-room-seat__avatar {
   width: 100%;
   height: 100%;
@@ -8552,6 +8572,35 @@ body.h5-is-blocked #h5-stage {
 }
 
 .h5-room-seat__badge.is-you { color: #d8f3df; background: #285c3d; }
+
+.h5-room-seat__kick,
+.h5-pick-player__kick {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 auto;
+  min-width: 21px;
+  padding: 2px 4px;
+  pointer-events: auto;
+  color: #f1b1a7;
+  border: 1px solid rgba(196, 76, 64, .48);
+  border-radius: 5px;
+  background: rgba(91, 28, 24, .68);
+  font-size: 5px;
+  font-weight: 800;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.h5-room-seat__kick.is-offline,
+.h5-pick-player__kick.is-offline {
+  color: #23140d;
+  border-color: #e2b656;
+  background: #e2b656;
+  box-shadow: 0 0 7px rgba(226, 182, 86, .2);
+}
+
+.h5-room-seat__kick:active,
+.h5-pick-player__kick:active { transform: translateY(1px); }
 
 .h5-room-seat small {
   overflow: hidden;

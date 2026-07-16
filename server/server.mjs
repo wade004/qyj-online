@@ -1469,6 +1469,32 @@ export function startServer(port = 8790, {
       removeFromTeam(client);
       sendLobbyTo(client);
 
+    } else if (cmd === 'kick') {
+      const team = client.teamId ? teams.get(client.teamId) : null;
+      if (!team) return fail(client, ERROR_CODES.NOT_IN_ROOM, '你当前不在队伍中');
+      if (team.ownerId !== client.id) {
+        return fail(client, ERROR_CODES.NOT_ROOM_OWNER, '只有房主可以移出成员');
+      }
+      if (!['lobby', 'picking'].includes(team.phase)) {
+        return fail(client, ERROR_CODES.INVALID_ROOM_PHASE, '当前阶段不能移出成员');
+      }
+      if (msg.playerId === client.playerId) {
+        return fail(client, ERROR_CODES.CANNOT_KICK_SELF, '房主不能移出自己');
+      }
+      const targetId = team.members.find((id) => (
+        id !== client.id && clients.get(id)?.playerId === msg.playerId
+      ));
+      const target = targetId ? clients.get(targetId) : null;
+      if (!target) {
+        return fail(client, ERROR_CODES.ROOM_MEMBER_NOT_FOUND, '该成员已不在当前房间');
+      }
+      const targetWasOnline = target.connected;
+      removeFromTeam(target);
+      if (targetWasOnline) {
+        fail(target, ERROR_CODES.KICKED_FROM_ROOM, '你已被房主移出房间');
+        sendLobbyTo(target);
+      }
+
     } else if (cmd === 'rejoinGame') {
       if (client.teamId) {
         const team = teams.get(Number(client.teamId));

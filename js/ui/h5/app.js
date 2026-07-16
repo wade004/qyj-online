@@ -1009,27 +1009,46 @@ export function mountH5App({ root }) {
     ]));
   }
 
+  function confirmKickRoomMember(member) {
+    if (!member?.playerId || member.isYou) return;
+    const offline = memberConnection(member) !== 'online';
+    root.appendChild(dialog({
+      title: '移出房间成员',
+      message: offline
+        ? `${member.name} 当前处于离线保留状态。移出后将立即释放席位，房间可以继续开局。`
+        : `确定将 ${member.name} 移出房间吗？对方会返回联机大厅。`,
+      confirmText: '确认移出',
+      confirmTestId: 'h5-kick-member-confirm',
+      danger: true,
+      onConfirm: () => onlineSession.kickMember(member.playerId),
+    }));
+  }
+
   function renderOnlineRoom() {
     const data = onlineState.data || {};
     const members = data.members || [];
     const totalPlayers = onlineTableSize(data);
     const maxMembers = Number(data.maxMembers) || totalPlayers;
     const me = members.find((member) => member.isYou);
+    const isOwner = Boolean(data.isOwner || me?.isOwner);
     const unavailableMembers = members.filter((member) => memberConnection(member) !== 'online');
     const seats = [];
     for (let index = 0; index < maxMembers; index++) {
       const member = members[index];
       seats.push(member
-        ? button('', {
+        ? element('article', {
           className: `h5-room-seat${member.isYou ? ' is-you' : ''}`,
           attrs: {
             'data-testid': 'h5-room-member',
             'data-is-you': member.isYou ? 'true' : 'false',
             'data-owner': member.isOwner ? 'true' : 'false',
-            'aria-label': `查看${member.name}的扑克统计`,
           },
-          on: { click: () => openPlayerStats(member) },
         }, [
+          button('', {
+            className: 'h5-room-seat__stats-hit',
+            attrs: { 'aria-label': `查看${member.name}的扑克统计` },
+            on: { click: () => openPlayerStats(member) },
+          }),
           element('span', { className: 'h5-room-seat__avatar-wrap' }, [
             element('img', {
               className: 'h5-room-seat__avatar',
@@ -1045,6 +1064,20 @@ export function mountH5App({ root }) {
               element('strong', { text: member.name, attrs: { 'data-testid': 'h5-room-member-name' } }),
               member.isOwner && element('i', { className: 'h5-room-seat__badge', text: '房主' }),
               member.isYou && element('i', { className: 'h5-room-seat__badge is-you', text: '你' }),
+              isOwner && !member.isYou && button('移出', {
+                className: `h5-room-seat__kick${memberConnection(member) === 'online' ? '' : ' is-offline'}`,
+                attrs: {
+                  'data-testid': 'h5-kick-member',
+                  'aria-label': `移出${member.name}`,
+                  title: memberConnection(member) === 'online' ? '移出房间' : '释放离线席位',
+                },
+                on: {
+                  click: (event) => {
+                    event.stopPropagation();
+                    confirmKickRoomMember(member);
+                  },
+                },
+              }),
             ]),
             element('small', {
               className: `is-${memberConnection(member)}`,
@@ -1072,7 +1105,6 @@ export function mountH5App({ root }) {
         ]));
     }
     const aiCount = Math.max(0, totalPlayers - members.length);
-    const isOwner = Boolean(data.isOwner || me?.isOwner);
     const startBlocked = unavailableMembers.length > 0;
     const chatMessages = Array.isArray(data.chatMessages) ? data.chatMessages : [];
     const chatList = element('div', {
@@ -1308,6 +1340,14 @@ export function mountH5App({ root }) {
               element('strong', { text: String(member.name || `玩家${index + 1}`) }),
               member.isOwner && element('i', { text: '房主' }),
               member.isYou && element('i', { className: 'is-you', text: '你' }),
+              data.isOwner && !member.isYou && button('移出', {
+                className: `h5-pick-player__kick${memberConnection(member) === 'online' ? '' : ' is-offline'}`,
+                attrs: {
+                  'data-testid': 'h5-pick-kick-member',
+                  'aria-label': `移出${member.name}`,
+                },
+                on: { click: () => confirmKickRoomMember(member) },
+              }),
             ]),
             element('small', { text: ready ? `${memberHero.name} · 已准备` : '尚未选择 · 未准备' }),
           ]),

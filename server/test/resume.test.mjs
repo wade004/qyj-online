@@ -266,6 +266,60 @@ test('离线成员阻止开局并在宽限期后清退', async () => {
   }
 });
 
+test('房主可以立即移出离线保留成员并继续开局', async () => {
+  const { server, port } = await openServer({ resumeGraceMs: 5_000 });
+  const sockets = [];
+  try {
+    const owner = await connect(server, port); sockets.push(owner.ws);
+    const member = await connect(server, port); sockets.push(member.ws);
+    const ownerPlayerId = owner.session.a.profile.playerId;
+    const memberPlayerId = member.session.a.profile.playerId;
+    const memberResumeToken = member.session.a.resumeToken;
+
+    owner.send({ cmd: 'create' });
+    const room = await owner.waitFor(
+      (msg) => msg.ev === 'team' && msg.a.members.length === 1,
+      '创建房间',
+    );
+    member.send({ cmd: 'join', teamId: room.a.id });
+    await owner.waitFor((msg) => msg.ev === 'team' && msg.a.members.length === 2, '成员加入');
+    await member.waitFor((msg) => msg.ev === 'team' && msg.a.members.length === 2, '成员房间状态');
+
+    member.send({ cmd: 'kick', playerId: ownerPlayerId });
+    const forbidden = await member.waitFor((msg) => msg.ev === 'error', '非房主移出阻断');
+    assert.equal(forbidden.a.code, ERROR_CODES.NOT_ROOM_OWNER);
+
+    owner.inbox.length = 0;
+    await closeSocket(member.ws);
+    await owner.waitFor(
+      (msg) => msg.ev === 'team'
+        && msg.a.members.some((item) => item.playerId === memberPlayerId
+          && item.connection === 'offline'),
+      '成员离线保留',
+    );
+
+    owner.send({ cmd: 'kick', playerId: memberPlayerId });
+    const cleaned = await owner.waitFor(
+      (msg) => msg.ev === 'team' && msg.a.members.length === 1,
+      '房主移出离线成员',
+    );
+    assert.equal(cleaned.a.members[0].playerId, ownerPlayerId);
+    owner.send({ cmd: 'startPick' });
+    await owner.waitFor((msg) => msg.ev === 'pick', '移出后立即选将');
+
+    const resumedMember = await connect(server, port, {
+      resumeToken: memberResumeToken,
+      cookie: member.cookie,
+    });
+    sockets.push(resumedMember.ws);
+    assert.equal(resumedMember.session.a.resumed, true, '移出成员仍可恢复账号会话');
+    await resumedMember.waitFor((msg) => msg.ev === 'lobby', '移出成员返回大厅');
+  } finally {
+    await Promise.all(sockets.map((ws) => closeSocket(ws).catch(() => {})));
+    await server.close();
+  }
+});
+
 test('选将阶段离线成员阻止开战，过期后可继续', async () => {
   const { server, port } = await openServer({ resumeGraceMs: 80 });
   const sockets = [];

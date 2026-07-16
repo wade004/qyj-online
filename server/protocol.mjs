@@ -30,6 +30,9 @@ export const ERROR_CODES = Object.freeze({
   ROOM_SEAT_REPLACED: 'ROOM_SEAT_REPLACED',
   NOT_IN_ROOM: 'NOT_IN_ROOM',
   NOT_ROOM_OWNER: 'NOT_ROOM_OWNER',
+  ROOM_MEMBER_NOT_FOUND: 'ROOM_MEMBER_NOT_FOUND',
+  CANNOT_KICK_SELF: 'CANNOT_KICK_SELF',
+  KICKED_FROM_ROOM: 'KICKED_FROM_ROOM',
   INVALID_ROOM_PHASE: 'INVALID_ROOM_PHASE',
   INVALID_NAME: 'INVALID_NAME',
   HERO_NOT_FOUND: 'HERO_NOT_FOUND',
@@ -61,7 +64,7 @@ export const ERROR_CODES = Object.freeze({
 
 const KNOWN_COMMANDS = new Set([
   'hello',
-  'create', 'join', 'leave', 'rename', 'startPick', 'pick', 'startGame',
+  'create', 'join', 'leave', 'kick', 'rename', 'startPick', 'pick', 'startGame',
   'act', 'skill', 'extend', 'backToRoom', 'lobby', 'resume', 'rejoinGame',
   'identify', 'updateProfile', 'chat',
 ]);
@@ -69,6 +72,7 @@ const KNOWN_COMMANDS = new Set([
 const ACTION_TYPES = new Set(['fold', 'check', 'call', 'raise', 'allin']);
 const PLAYER_EMBLEMS = new Set(['侠', '群', '墨', '月']);
 const GUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._~-]{11,127}$/u;
+const PLAYER_ID_RE = /^p_[A-Za-z0-9_-]{20,64}$/u;
 const FORBIDDEN_NICKNAME_RE = /[<>\p{Cc}\p{Cs}\u202A-\u202E\u2066-\u2069]/u;
 
 const failure = (code, message) => ({ ok: false, error: { code, message } });
@@ -179,6 +183,11 @@ function validateFields(msg) {
     case 'rejoinGame':
       if (!Number.isSafeInteger(msg.teamId) || msg.teamId < 1) {
         return failure(ERROR_CODES.INVALID_FIELD, 'teamId 必须是正整数');
+      }
+      break;
+    case 'kick':
+      if (typeof msg.playerId !== 'string' || !PLAYER_ID_RE.test(msg.playerId)) {
+        return failure(ERROR_CODES.INVALID_FIELD, 'playerId 格式无效');
       }
       break;
     case 'rename':

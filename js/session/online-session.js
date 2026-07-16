@@ -1082,6 +1082,12 @@ export class OnlineSession {
     return true;
   }
   rename(name) { return this.send('rename', { name: String(name || '').trim() }); }
+  kickMember(playerId) {
+    if (this.state.writeBlocked || this.state.connection !== 'open') return false;
+    const targetPlayerId = String(playerId || '').trim();
+    if (!targetPlayerId) return false;
+    return this.send('kick', { playerId: targetPlayerId });
+  }
   leaveTeam() {
     if (this.state.writeBlocked || this.state.connection !== 'open') return false;
     this.showConnecting('正在退出队伍…');
