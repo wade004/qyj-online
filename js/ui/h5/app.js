@@ -420,6 +420,21 @@ export function mountH5App({ root }) {
     });
   }
 
+  function heroSkillSections(hero) {
+    const skills = hero.skills?.display || hero.skills?.all || [];
+    return skills.map((skill) => element('section', { className: 'h5-hero-skill-summary' }, [
+      element('h3', {
+        text: `${skill.kind === 'active' ? '主动' : '被动'} · ${skill.name}${skill.limited ? ' · 限定技' : ''}`,
+      }),
+      element('p', { text: skill.description }),
+      element('small', {
+        text: skill.kind === 'active'
+          ? `发动条件：${skill.conditionDescription}`
+          : `触发条件：${skill.conditionDescription}`,
+      }),
+    ]));
+  }
+
   function heroDetail({ hero, primaryText, onPrimary, primaryDisabled = false, secondary = null }) {
     const portrait = element('div', { className: 'h5-hero-detail__portrait' });
     portrait.style.backgroundImage = `url("${h5HeroPortrait(hero, 'detail')}")`;
@@ -427,11 +442,7 @@ export function mountH5App({ root }) {
       portrait,
       element('div', { className: 'h5-hero-detail__heading' }, [element('h2', { text: hero.name }), element('span', { text: hero.type })]),
       element('div', { className: 'h5-hero-detail__scroll' }, [
-        element('h3', { text: `主动 · ${hero.skillName} · ${hero.skillCost}⚡` }),
-        element('p', { text: hero.skillDesc }),
-        element('small', { text: `发动条件：${hero.condDesc}` }),
-        element('h3', { text: '被动' }),
-        element('p', { text: hero.passiveDesc }),
+        ...heroSkillSections(hero),
         element('blockquote', { text: `“${hero.lines?.enter || ''}”` }),
       ]),
       button(primaryText, {
@@ -1371,18 +1382,11 @@ export function mountH5App({ root }) {
             ]),
             element('div', { className: 'h5-pick-lock__traits' }, [
               element('span', { text: hero.type }),
-              element('span', { text: hero.skillName }),
-              element('span', { text: `${hero.skillCost}⚡` }),
+              ...(hero.skills?.display || hero.skills?.all || [])
+                .map((skill) => element('span', { text: skill.name })),
+              element('span', { text: '条件技' }),
             ]),
-            element('section', {}, [
-              element('h3', { text: `主动 · ${hero.skillName}` }),
-              element('p', { text: hero.skillDesc }),
-              element('small', { text: `发动条件：${hero.condDesc}` }),
-            ]),
-            element('section', {}, [
-              element('h3', { text: '被动特性' }),
-              element('p', { text: hero.passiveDesc }),
-            ]),
+            ...heroSkillSections(hero),
             element('blockquote', { text: `“${hero.lines?.enter || ''}”` }),
           ]),
         ])
@@ -1398,7 +1402,10 @@ export function mountH5App({ root }) {
           element('footer', { className: 'h5-pick-select__confirm' }, [
             element('div', {}, [
               element('strong', { text: `${hero.name} · ${hero.type}` }),
-              element('span', { text: `主动：${hero.skillName} · ${hero.skillCost}⚡` }),
+              element('span', {
+                text: (hero.skills?.display || hero.skills?.all || []).map((skill) =>
+                  `${skill.kind === 'active' ? '主动' : '被动'}：${skill.name}`).join(' · '),
+              }),
             ]),
             button('确认选择', {
               className: 'h5-primary-button',

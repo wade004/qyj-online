@@ -9,6 +9,9 @@ training/checkpoints/
 training/artifacts/
 training/datasets/
 training/profiles/
+.local/sfx/
+.local/tts/
+__pycache__/
 .DS_Store
 server/data/*.sqlite
 server/data/*.sqlite-*

@@ -62,8 +62,13 @@ remote.playerAct({ type: 'raise', tier: { key: 'feint' } });
 assert(commands[0]?.cmd === 'act' && commands[0]?.tierKey === 'feint', '远程行动命令透传');
 
 const remoteMe = remote.players[1];
-remote.rawEngine.street = 'preflop';
-remote.rawEngine.revealed = 0;
+remote.rawEngine.street = 'flop';
+remote.rawEngine.revealed = 3;
+remote.rawEngine.pot = 200;
+remote.rawEngine.board = [
+  { rank: 2, suit: 1 }, { rank: 7, suit: 2 }, { rank: 9, suit: 3 },
+  { rank: 11, suit: 4 }, { rank: 14, suit: 1 },
+];
 remoteMe.hole = [{ rank: 8, suit: 1 }, { rank: 4, suit: 2 }];
 remoteMe.energy = 5;
 remoteMe.skillUsed = false;
@@ -74,7 +79,9 @@ remote.rawEngine.waitingIdx = 2;
 assert(!remote.useSkill(1) && commands.length === 1, '远程镜像不得在别人回合发送技能命令');
 remote.rawEngine.actingIdx = 1;
 remote.rawEngine.waitingIdx = 1;
-assert(remote.useSkill(1) && commands[1]?.cmd === 'skill', '本人行动窗口应发送技能命令');
+assert(remote.useSkill(1, { rankBand: 'high', suitPair: '14' }, 'zhugeliang_guanxing')
+  && commands[1]?.cmd === 'skill' && commands[1]?.skillId === 'zhugeliang_guanxing',
+'本人行动窗口应发送指定技能命令');
 remote.rawEngine.actingIdx = 0;
 remote.rawEngine.waitingIdx = null;
 assert(!remote.useSkill(1) && commands.length === 2, '行动完成后不得继续发送技能命令');

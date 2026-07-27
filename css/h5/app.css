@@ -5937,7 +5937,8 @@ body.h5-is-blocked #h5-stage {
 }
 
 .h5-seat__skill.is-triggered,
-.h5-skill-button.is-triggered {
+.h5-skill-button.is-triggered,
+.h5-passive-button.is-triggered {
   animation: h5-seat-skill-trigger .9s ease-out both;
 }
 
@@ -5997,7 +5998,81 @@ body.h5-is-blocked #h5-stage {
   transform: translate(-50%, -50%);
 }
 
+.h5-unified-skill-display {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+
+.h5-unified-skill-display__item {
+  min-width: 0;
+  flex: 1 1 0;
+  display: inline;
+  padding: 0 7px;
+  color: #eadfc8;
+  font-style: normal;
+  line-height: 1.5;
+}
+
+.h5-unified-skill-display__item.is-focused {
+  border-radius: 5px;
+  background: linear-gradient(90deg, rgba(225, 181, 84, .16), rgba(225, 181, 84, .04));
+  box-shadow: inset 2px 0 rgba(239, 200, 105, .82);
+}
+
+.h5-unified-skill-display__item:first-child { padding-left: 0; }
+.h5-unified-skill-display__item + .h5-unified-skill-display__item {
+  border-left: 1px solid rgba(226, 181, 91, .38);
+}
+
+.h5-unified-skill-display__item strong {
+  color: #fff2cc;
+  font-weight: 900;
+}
+
+.h5-unified-skill-display__item span {
+  margin-left: 4px;
+}
+
+.h5-unified-skill-display__item small {
+  margin-left: 4px;
+  color: #bea986;
+  font: inherit;
+}
+
+.h5-seat-skill-preview.is-pinned {
+  border-color: rgba(239, 198, 100, .78);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .72), 0 0 0 1px rgba(239, 198, 100, .14);
+  pointer-events: auto;
+}
+
+.h5-unified-skill-display--drawer {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(226, 181, 91, .5);
+  border-radius: 9px;
+  background: rgba(18, 13, 10, .96);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .45);
+  font-size: 12px;
+}
+
 .h5-seat-skill-preview[hidden] { display: none !important; }
+
+@media (max-width: 720px), (max-height: 460px) {
+  .h5-unified-skill-display--drawer {
+    flex-direction: column;
+  }
+
+  .h5-unified-skill-display--drawer .h5-unified-skill-display__item {
+    padding: 3px 0;
+  }
+
+  .h5-unified-skill-display--drawer .h5-unified-skill-display__item
+    + .h5-unified-skill-display__item {
+    border-top: 1px solid rgba(226, 181, 91, .38);
+    border-left: 0;
+  }
+}
 
 .h5-seat__action.h5-player-status {
   z-index: 11;
@@ -6420,14 +6495,17 @@ body.h5-is-blocked #h5-stage {
 }
 
 .h5-me .h5-skill-button.is-ready,
-.h5-me .h5-skill-button[data-skill-state='ready'] {
+.h5-me .h5-skill-button[data-skill-state='ready'],
+.h5-me .h5-passive-button.is-ready,
+.h5-me .h5-passive-button[data-skill-state='ready'] {
   color: #fff2bf;
   border-color: #efcb6e !important;
   background: linear-gradient(180deg, rgba(119, 78, 28, .95), rgba(53, 35, 18, .98));
   box-shadow: inset 0 1px rgba(255, 236, 177, .25), 0 0 13px rgba(231, 184, 74, .55);
 }
 
-.h5-me .h5-skill-button.is-ready .h5-skill-button__icon {
+.h5-me .h5-skill-button.is-ready .h5-skill-button__icon,
+.h5-me .h5-passive-button.is-ready .h5-passive-button__icon {
   color: #fff4c8;
   border-color: #f4d27d;
   background: radial-gradient(circle at 36% 30%, #f1d777, #92591f);
@@ -6435,8 +6513,177 @@ body.h5-is-blocked #h5-stage {
   animation: h5-seat-skill-ready 1.15s ease-in-out infinite alternate;
 }
 
-.h5-me .h5-skill-button:disabled { opacity: .62; }
-.h5-me .h5-skill-button[data-skill-state='used'] { filter: grayscale(.45); }
+.h5-me .h5-skill-button:disabled,
+.h5-me .h5-passive-button:disabled { opacity: .62; }
+.h5-me .h5-skill-button[data-skill-state='used'],
+.h5-me .h5-passive-button[data-skill-state='used'] { filter: grayscale(.45); }
+
+/* Skill presentation: one reusable, theme-driven layer for all 32 skills. */
+.h5-skill-vfx {
+  --skill-tone: #e7c25d;
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-content: center;
+  pointer-events: none;
+  overflow: hidden;
+  color: #fff7dc;
+  text-align: center;
+  text-shadow: 0 2px 9px #000, 0 0 24px var(--skill-tone);
+  animation: h5-skill-vfx-fade 1.3s ease-out both;
+}
+
+.h5-skill-vfx::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 48%, color-mix(in srgb, var(--skill-tone) 28%, transparent), transparent 38%),
+    linear-gradient(105deg, transparent 20%, color-mix(in srgb, var(--skill-tone) 18%, transparent) 49%, transparent 75%);
+  animation: h5-skill-vfx-sweep .85s ease-out both;
+}
+
+.h5-skill-vfx__ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(36vw, 380px);
+  aspect-ratio: 1;
+  border: 3px solid var(--skill-tone);
+  border-radius: 50%;
+  box-shadow: 0 0 28px var(--skill-tone), inset 0 0 28px var(--skill-tone);
+  transform: translate(-50%, -50%);
+  animation: h5-skill-vfx-ring .9s cubic-bezier(.2,.8,.2,1) both;
+}
+
+.h5-skill-vfx__slash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(58vw, 680px);
+  height: 4px;
+  background: linear-gradient(90deg, transparent, var(--skill-tone), #fff, var(--skill-tone), transparent);
+  box-shadow: 0 0 22px var(--skill-tone);
+  transform: translate(-50%, -50%) rotate(-8deg) scaleX(0);
+}
+
+.h5-skill-vfx.is-attack .h5-skill-vfx__slash,
+.h5-skill-vfx.is-pressure .h5-skill-vfx__slash,
+.h5-skill-vfx.is-taunt .h5-skill-vfx__slash,
+.h5-skill-vfx.is-bluff .h5-skill-vfx__slash {
+  animation: h5-skill-vfx-slash .58s ease-out .12s both;
+}
+
+.h5-skill-vfx.is-defense .h5-skill-vfx__ring {
+  border-width: 7px;
+  animation-name: h5-skill-vfx-shield;
+}
+
+.h5-skill-vfx.is-control::before,
+.h5-skill-vfx.is-prediction::before,
+.h5-skill-vfx.is-read::before {
+  background:
+    repeating-conic-gradient(from 0deg at 50% 50%, transparent 0 11deg, color-mix(in srgb, var(--skill-tone) 16%, transparent) 12deg 13deg),
+    radial-gradient(circle, color-mix(in srgb, var(--skill-tone) 22%, transparent), transparent 42%);
+}
+
+.h5-skill-vfx.is-trade::before {
+  background:
+    radial-gradient(circle at 42% 45%, var(--skill-tone) 0 3px, transparent 4px),
+    radial-gradient(circle at 58% 55%, var(--skill-tone) 0 4px, transparent 5px),
+    radial-gradient(circle, color-mix(in srgb, var(--skill-tone) 25%, transparent), transparent 42%);
+  background-size: 48px 48px, 62px 62px, auto;
+}
+
+.h5-skill-vfx.is-trick::before {
+  background:
+    linear-gradient(128deg, transparent 18%, color-mix(in srgb, var(--skill-tone) 24%, transparent) 36%, transparent 52%),
+    linear-gradient(52deg, transparent 28%, color-mix(in srgb, #9b6cff 28%, transparent) 51%, transparent 72%),
+    radial-gradient(ellipse at center, color-mix(in srgb, var(--skill-tone) 18%, transparent), transparent 48%);
+}
+
+.h5-skill-vfx.is-trick .h5-skill-vfx__ring {
+  border-style: dashed;
+  animation-direction: reverse;
+}
+
+.h5-skill-vfx.is-tactical::before {
+  background:
+    repeating-linear-gradient(0deg, transparent 0 38px, color-mix(in srgb, var(--skill-tone) 13%, transparent) 39px 40px),
+    repeating-linear-gradient(90deg, transparent 0 38px, color-mix(in srgb, var(--skill-tone) 13%, transparent) 39px 40px),
+    radial-gradient(circle, color-mix(in srgb, var(--skill-tone) 20%, transparent), transparent 45%);
+}
+
+.h5-skill-vfx.is-mystic::before {
+  background:
+    conic-gradient(from 20deg at 50% 50%,
+      color-mix(in srgb, #7fd4ff 20%, transparent),
+      color-mix(in srgb, #c58bff 22%, transparent),
+      color-mix(in srgb, #76d0ad 20%, transparent),
+      color-mix(in srgb, #f6c343 18%, transparent),
+      color-mix(in srgb, #7fd4ff 20%, transparent)),
+    radial-gradient(circle, color-mix(in srgb, var(--skill-tone) 28%, transparent), transparent 42%);
+}
+
+.h5-skill-vfx.is-mystic .h5-skill-vfx__ring {
+  border-width: 5px;
+  border-style: double;
+}
+
+.h5-skill-vfx strong {
+  position: relative;
+  z-index: 2;
+  font-size: clamp(28px, 4.4vw, 70px);
+  letter-spacing: .16em;
+  animation: h5-skill-vfx-title .72s cubic-bezier(.2,.8,.2,1) both;
+}
+
+.h5-skill-vfx small {
+  position: relative;
+  z-index: 2;
+  margin-top: .45em;
+  color: var(--skill-tone);
+  font-size: clamp(13px, 1.45vw, 24px);
+  letter-spacing: .24em;
+}
+
+@keyframes h5-skill-vfx-fade {
+  0% { opacity: 0; }
+  12%, 68% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes h5-skill-vfx-sweep {
+  from { transform: translateX(-32%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes h5-skill-vfx-ring {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(.28) rotate(-28deg); }
+  55% { opacity: 1; }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(1.38) rotate(18deg); }
+}
+@keyframes h5-skill-vfx-shield {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(1.35); }
+  42% { opacity: 1; transform: translate(-50%, -50%) scale(.72); }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(.9); }
+}
+@keyframes h5-skill-vfx-slash {
+  0% { opacity: 0; transform: translate(-50%, -50%) rotate(-8deg) scaleX(0); }
+  48% { opacity: 1; transform: translate(-50%, -50%) rotate(-8deg) scaleX(1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) rotate(-8deg) scaleX(1.25); }
+}
+@keyframes h5-skill-vfx-title {
+  from { opacity: 0; transform: translateY(18px) scale(.86); filter: blur(7px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .h5-skill-vfx,
+  .h5-skill-vfx::before,
+  .h5-skill-vfx__ring,
+  .h5-skill-vfx__slash,
+  .h5-skill-vfx strong { animation-duration: .01ms !important; }
+}
 
 .h5-me__skill-state {
   grid-column: 2 / 4;
@@ -6856,8 +7103,11 @@ body.h5-is-blocked #h5-stage {
   z-index: 1000 !important;
   left: 0;
   top: 0;
-  width: max-content;
-  max-width: min(360px, calc(100% - 12px));
+  box-sizing: border-box;
+  width: min(560px, calc(100% - 16px));
+  max-width: none;
+  max-height: calc(100% - 16px);
+  overflow: auto;
   margin: 0;
   transform: none !important;
   pointer-events: none;
@@ -7479,10 +7729,10 @@ body.h5-is-blocked #h5-stage {
 }
 
 /* Activate command deck v3 after all legacy compatibility overrides. */
-.h5-seat > .h5-seat__skill:not(.h5-seat__skill--passive) {
+.h5-seat > .h5-seat__skill--primary {
   right: calc(var(--h5-seat-inset) + var(--h5-seat-skill-size) + 1px) !important;
 }
-.h5-seat > .h5-seat__skill--passive { right: var(--h5-seat-inset) !important; }
+.h5-seat > .h5-seat__skill--secondary { right: var(--h5-seat-inset) !important; }
 
 .h5-battle__dock {
   grid-template-columns: clamp(280px, 31cqw, 390px) minmax(280px, 1fr) clamp(165px, 20cqw, 245px) !important;
@@ -7699,14 +7949,14 @@ body.h5-is-blocked #h5-stage {
 }
 .h5-seat__energy::before { left: 0 !important; font-size: 4px !important; }
 .h5-seat > .h5-seat__skill,
-.h5-seat > .h5-seat__skill:not(.h5-seat__skill--passive),
-.h5-seat > .h5-seat__skill--passive {
+.h5-seat > .h5-seat__skill--primary,
+.h5-seat > .h5-seat__skill--secondary {
   right: var(--h5-seat-inset) !important;
 }
-.h5-seat > .h5-seat__skill:not(.h5-seat__skill--passive) {
+.h5-seat > .h5-seat__skill--primary {
   top: calc(var(--h5-seat-portrait-top) + 2px) !important;
 }
-.h5-seat > .h5-seat__skill--passive {
+.h5-seat > .h5-seat__skill--secondary {
   top: calc(var(--h5-seat-portrait-top) + var(--h5-seat-skill-size) + 4px) !important;
 }
 
@@ -7825,9 +8075,9 @@ body.h5-is-blocked #h5-stage {
   font-size: 6px !important;
 }
 .h5-seat > .h5-seat__skill,
-.h5-seat > .h5-seat__skill:not(.h5-seat__skill--passive),
-.h5-seat > .h5-seat__skill--passive { right: var(--h5-seat-inset) !important; }
-.h5-seat > .h5-seat__skill--passive {
+.h5-seat > .h5-seat__skill--primary,
+.h5-seat > .h5-seat__skill--secondary { right: var(--h5-seat-inset) !important; }
+.h5-seat > .h5-seat__skill--secondary {
   top: calc(var(--h5-seat-portrait-top) + var(--h5-seat-skill-size) + 2px) !important;
 }
 

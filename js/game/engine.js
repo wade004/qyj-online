@@ -10,13 +10,182 @@ import { newShuffledDeck, draw, shuffle } from './deck.js';
 import { describe, evalBest } from './handeval.js';
 import { getHero, HEROES } from './heroes.js';
 import {
+  applySkillOptions,
   dispatchSkillEvent,
   executeActiveSkill,
+  getSkillActionSeconds,
   getSkillAvailability,
   getSkillInput,
+  hasOpenInsuranceWindow,
+  notifySkillActionApplied,
+  openInsuranceOffer,
   resetRoundSkillState,
+  settleSkillAdjustments,
 } from './skills.js';
 import * as AI from './ai.js';
+import { captureNativePurePokerDecisionObservation } from './observation.js';
+
+// Only Engine itself may register an instance.  The V375 offline collector
+// uses the paired assertion from observation.js to distinguish a live engine
+// decision from a hand-written Engine-shaped test object or JSON payload.
+// Keep the WeakSet module-private: it carries no game state and cannot be
+// serialized or populated by an external caller.
+const NATIVE_ENGINE_INSTANCES = new WeakSet();
+const NATIVE_ENGINE_STREAMS = new WeakMap();
+const ACTIVE_NATIVE_PURE_POKER_DECISION_BOUNDARIES = new WeakMap();
+// Capture once at trusted module initialization. A later monkeypatch of
+// global Math.random cannot turn a collector-owned system stream deterministic.
+const NATIVE_SYSTEM_RANDOM_SOURCE = Math.random;
+
+const NATIVE_PURE_POKER_MIN_RNG_CALLS = 24;
+const NATIVE_PURE_POKER_MIN_RNG_BUCKETS = 4;
+let PROCEED_ACTION_INTERNAL = null;
+let REQUEST_ACTION_INTERNAL = null;
+let APPLY_ACTION_INTERNAL = null;
+let ADVANCE_STREET_INTERNAL = null;
+
+export function assertNativeEngineInstance(engine) {
+  if (!NATIVE_ENGINE_INSTANCES.has(engine)) {
+    throw new RangeError('V375 native collection requires an Engine-created instance');
+  }
+  return engine;
+}
+
+/** Verify an Engine-private boundary object without exposing a getter for it. */
+export function assertNativePurePokerDecisionBoundary(engine, observerIdx, boundary) {
+  assertNativeEngineInstance(engine);
+  const active = ACTIVE_NATIVE_PURE_POKER_DECISION_BOUNDARIES.get(engine);
+  if (!active || active !== boundary || active.observerIdx !== Number(observerIdx)) {
+    throw new RangeError('V375 native decision boundary is not currently Engine-authorized');
+  }
+  return boundary;
+}
+
+function nativeStreamState(engine) {
+  return NATIVE_ENGINE_STREAMS.get(engine) || null;
+}
+
+function beginNativeRound(engine) {
+  const state = nativeStreamState(engine);
+  if (!state) return;
+  state.round = engine.round;
+  state.rngCalls = 0;
+  state.rngBuckets = new Set();
+  state.ready = false;
+  state.actionDispatch = null;
+  state.awaitingNativeAction = null;
+  state.nativeActionContinuation = null;
+}
+
+function markNativeRoundStarted(engine) {
+  const state = nativeStreamState(engine);
+  if (!state) return;
+  state.round = engine.round;
+  state.ready = state.purePokerAtConstruction
+    && state.rngSourceKind === 'system'
+    && engine.skillsEnabled === false
+    && engine.tableSize === state.tableSize
+    && state.rngCalls >= NATIVE_PURE_POKER_MIN_RNG_CALLS
+    && state.rngBuckets.size >= NATIVE_PURE_POKER_MIN_RNG_BUCKETS;
+}
+
+/**
+ * Bind one Engine instance to one opaque campaign-owned collector session.
+ * The session object itself is minted and checked by the V375 accumulator;
+ * Engine only carries it across its private action boundary.  A deterministic
+ * injected RNG, a non-pure construction, or cross-table mutation cannot bind.
+ */
+export function bindNativePurePokerCollectorSession(engine, collectorBinding) {
+  assertNativeEngineInstance(engine);
+  const state = nativeStreamState(engine);
+  if (!state || !collectorBinding || typeof collectorBinding !== 'object') {
+    throw new RangeError('V375 native collector binding must be an opaque object');
+  }
+  if (!state.purePokerAtConstruction || state.rngSourceKind !== 'system'
+    || engine.skillsEnabled !== false || engine.tableSize !== state.tableSize) {
+    throw new RangeError('V375 collector binding requires an immutable pure-poker Engine with system RNG');
+  }
+  const listenerKeys = Object.keys(engine.listeners || {}).sort();
+  if (listenerKeys.length !== 1 || listenerKeys[0] !== 'onNativePurePokerDecisionBoundary'
+    || typeof engine.listeners.onNativePurePokerDecisionBoundary !== 'function') {
+    throw new RangeError('V375 collector binding requires a collector-owned Engine with only the native decision listener');
+  }
+  if (state.collectorBinding && state.collectorBinding !== collectorBinding) {
+    throw new RangeError('A native Engine may be bound to exactly one V375 collector session');
+  }
+  state.collectorBinding = collectorBinding;
+  state.collectorListeners = engine.listeners;
+  state.collectorListener = engine.listeners.onNativePurePokerDecisionBoundary;
+  return Object.freeze({ tableSize: state.tableSize, skillsEnabled: false });
+}
+
+function scheduleNativeProceedAction(engine, seconds) {
+  engine.delay(seconds, () => {
+    const state = nativeStreamState(engine);
+    if (!state || typeof PROCEED_ACTION_INTERNAL !== 'function') {
+      throw new Error('Native Engine action dispatcher is unavailable');
+    }
+    const dispatch = {
+      round: engine.round,
+      tableSize: state.tableSize,
+      expectedActorIdx: null,
+      boundaryIssued: false,
+    };
+    state.actionDispatch = dispatch;
+    try {
+      PROCEED_ACTION_INTERNAL.call(engine);
+    } finally {
+      if (state.actionDispatch === dispatch) state.actionDispatch = null;
+    }
+  });
+}
+
+function consumeAwaitingNativeAction(engine, player) {
+  const state = nativeStreamState(engine);
+  const pending = state?.awaitingNativeAction;
+  if (!pending || pending.round !== engine.round || pending.player !== player) return false;
+  state.awaitingNativeAction = null;
+  return true;
+}
+
+function emitNativePurePokerDecisionBoundary(engine, player) {
+  const state = nativeStreamState(engine);
+  const dispatch = state?.actionDispatch;
+  const collectorBound = !!state?.collectorBinding;
+  if (!state || !dispatch || dispatch.boundaryIssued
+    || !state.ready || !state.purePokerAtConstruction || state.rngSourceKind !== 'system'
+    || engine.skillsEnabled !== false || engine.tableSize !== state.tableSize
+    || state.round !== engine.round || dispatch.round !== engine.round
+    || dispatch.tableSize !== state.tableSize || dispatch.expectedActorIdx !== player?.idx
+    || (collectorBound && (state.collectorListeners !== engine.listeners
+      || state.collectorListener !== engine.listeners?.onNativePurePokerDecisionBoundary
+      || Object.keys(engine.listeners || {}).length !== 1))
+    || !player?.alive || player.folded || player.allIn
+    || Number(engine.actingIdx) !== Number(player.idx)) {
+    return false;
+  }
+  const boundary = Object.freeze({
+    decisionReceipt: Object.freeze(Object.create(null)),
+    chanceStreamReceipt: state.chanceStreamReceipt,
+    collectorBinding: state.collectorBinding,
+    observerIdx: player.idx,
+    tableSize: engine.tableSize,
+    round: engine.round,
+    street: engine.street,
+    sequence: ++state.decisionSequence,
+  });
+  dispatch.boundaryIssued = true;
+  ACTIVE_NATIVE_PURE_POKER_DECISION_BOUNDARIES.set(engine, boundary);
+  try {
+    // Freeze the information set before listener code runs.  The callback is
+    // given that snapshot; it never receives the live Engine boundary token.
+    const observation = captureNativePurePokerDecisionObservation(engine, player.idx, boundary);
+    engine.emit('onNativePurePokerDecisionBoundary', player.idx, observation);
+  } finally {
+    ACTIVE_NATIVE_PURE_POKER_DECISION_BOUNDARIES.delete(engine);
+  }
+  return true;
+}
 
 export function cardText(card) {
   return Config.SUITS[card.suit].char + Config.RANK_NAMES[card.rank];
@@ -75,17 +244,48 @@ export class Engine {
    * @param {object} rules 模式专属终局规则
    */
   constructor(heroIds, listeners, humanSeats = null, names = {}, rules = {}) {
+    NATIVE_ENGINE_INSTANCES.add(this);
     this.listeners = listeners || {};
-    const randomSource = typeof rules.rng === 'function' ? rules.rng : Math.random;
-    this.rng = () => {
-      const value = Number(randomSource());
-      if (!Number.isFinite(value)) throw new TypeError('Engine RNG must return a finite number');
-      return Math.max(0, Math.min(1 - Number.EPSILON, value));
-    };
     const requestedTableSize = Number(rules.tableSize ?? Config.DEFAULT_TABLE_SIZE);
     if (!Config.SUPPORTED_TABLE_SIZES.includes(requestedTableSize)) {
       throw new RangeError(`Unsupported table size: ${requestedTableSize}`);
     }
+    const randomSource = typeof rules.rng === 'function' ? rules.rng : NATIVE_SYSTEM_RANDOM_SOURCE;
+    const nativeStream = {
+      chanceStreamReceipt: Object.freeze(Object.create(null)),
+      rngCalls: 0,
+      // Keep only coarse, process-local health buckets.  No seed or random
+      // draw is exposed or persisted by the V375 decision path.
+      rngBuckets: new Set(),
+      round: 0,
+      ready: false,
+      decisionSequence: 0,
+      tableSize: requestedTableSize,
+      purePokerAtConstruction: rules.skillsEnabled === false,
+      rngSourceKind: typeof rules.rng === 'function' ? 'injected' : 'system',
+      collectorBinding: null,
+      collectorListeners: null,
+      collectorListener: null,
+      actionDispatch: null,
+      awaitingNativeAction: null,
+      nativeActionContinuation: null,
+    };
+    NATIVE_ENGINE_STREAMS.set(this, nativeStream);
+    Object.defineProperty(this, 'rng', {
+      enumerable: false,
+      configurable: false,
+      writable: false,
+      value: () => {
+      const value = Number(randomSource());
+      if (!Number.isFinite(value)) throw new TypeError('Engine RNG must return a finite number');
+      const normalized = Math.max(0, Math.min(1 - Number.EPSILON, value));
+      nativeStream.rngCalls += 1;
+      if (nativeStream.rngBuckets.size < 32) {
+        nativeStream.rngBuckets.add(Math.floor(normalized * 65_536));
+      }
+      return normalized;
+      },
+    });
     this.tableSize = requestedTableSize;
     humanSeats = humanSeats || new Set([1]);
     this.players = [null]; // 1-based
@@ -109,11 +309,15 @@ export class Engine {
         lastActionBet: 0,
         lastAction: null,
         skillUsed: false,
+        skillMatchUsed: Object.create(null),
+        skillLastHand: Object.create(null),
+        skillLastTrigger: Object.create(null),
+        skillLossStreak: 0,
         skillStatuses: [],
         passiveUsed: Object.create(null),
         skillData: {
-          flags: Object.create(null), copiedPassiveIds: [],
-          revealedCard: null, raisedThisRound: false,
+          used: Object.create(null), flags: Object.create(null),
+          raisedThisRound: false, sizingHistory: [],
         },
         lastHandCategory: 1,
         roundStartHp: Config.INIT_HP,
@@ -153,6 +357,8 @@ export class Engine {
     // Explicitly disable both active and passive hero effects for neutral
     // poker training/duplicate evaluation. Live games remain unchanged.
     this.skillsEnabled = rules.skillsEnabled !== false;
+    this.skillState = null;
+    this.previousTopWinnerIdx = 0;
 
     // Append-only public betting history. `round` + `street` on every entry
     // make actions from different hands/streets unambiguous to a bot.
@@ -395,6 +601,7 @@ export class Engine {
   startRound() {
     if (this.gameOver) return;
     this.round++;
+    beginNativeRound(this);
     const blinds = Config.getBlinds(this.round);
 
     this.actingIdx = 0;
@@ -412,6 +619,7 @@ export class Engine {
     this.streetHadRaise = false;
     this.allInHandsRevealed = false;
     this.lastAggressiveWager = null;
+    this.skillState = null;
 
     for (let i = 1; i <= this.tableSize; i++) {
       const p = this.players[i];
@@ -509,11 +717,12 @@ export class Engine {
     this.currentBet = blinds.bb;
     this.minRaiseInc = blinds.bb;
     this.streetRaiseCount = 0;
+    markNativeRoundStarted(this);
     this.emit('onBlindsPosted', sbIdx, blinds.sb, bbIdx, blinds.bb);
     this.log(`${this.players[sbIdx].hero.name} 献祭 ${blinds.sb}，${this.players[bbIdx].hero.name} 献祭 ${blinds.bb}`, 'info');
 
     this.actionCursorIdx = bbIdx;
-    this.delay(1.4, () => this.proceedAction());
+    scheduleNativeProceedAction(this, 1.4);
   }
 
   // ---------------- 灌注（下注）流程 ----------------
@@ -541,16 +750,18 @@ export class Engine {
     const needsAct = (p) =>
       !p.folded && !p.allIn && (!p.acted || p.betStreet < this.currentBet);
     if (!active.some(needsAct)) {
-      this.advanceStreet();
+      ADVANCE_STREET_INTERNAL.call(this);
       return;
     }
     const nextActor = this.nextIdx(this.actionCursorIdx, needsAct);
     if (!nextActor) {
-      this.advanceStreet();
+      ADVANCE_STREET_INTERNAL.call(this);
       return;
     }
     this.actionCursorIdx = nextActor;
-    this.requestAction(this.players[nextActor]);
+    const state = nativeStreamState(this);
+    if (state?.actionDispatch) state.actionDispatch.expectedActorIdx = nextActor;
+    REQUEST_ACTION_INTERNAL.call(this, this.players[nextActor]);
   }
 
   getOptions(p) {
@@ -577,25 +788,51 @@ export class Engine {
         opts.tiers.push({ key: tier.key, name: tier.name, inc, cost });
       }
     }
-    return opts;
+    return this.skillsEnabled ? applySkillOptions(this, p, opts) : opts;
+  }
+
+  getActionTime(p, base = Config.ACTION_TIME) {
+    return this.skillsEnabled ? getSkillActionSeconds(this, p, base) : base;
   }
 
   requestAction(p) {
     this.actingIdx = p.idx;
+    if (p.isHuman) this.waitingIdx = p.idx;
+    if (p.skillData) {
+      const constrainedExtension = p.skillData.nextExtendSeconds;
+      p.skillData.currentExtendSeconds = constrainedExtension == null
+        ? Config.EXTEND_TIME
+        : Math.max(0, Number(constrainedExtension) || 0);
+      p.skillData.nextExtendSeconds = null;
+    }
+    // Capture before any general-purpose listener runs. A V375-bound Engine
+    // has only this collector callback, and it receives an already frozen
+    // snapshot rather than a mutable state boundary.
+    const nativeBoundaryIssued = emitNativePurePokerDecisionBoundary(this, p);
+    const nativeContinuation = nativeBoundaryIssued
+      ? Object.freeze({ round: this.round, player: p })
+      : null;
     this.emit('onTurnStart', p.idx);
     if (p.isHuman) {
-      this.waitingIdx = p.idx;
+      if (nativeContinuation) nativeStreamState(this).awaitingNativeAction = nativeContinuation;
       this.emit('onAwaitAction', p.idx, this.getOptions(p));
     } else {
       this.delay(0.9 + this.rng() * 1.1, () => {
         if (this.gameOver || p.folded || !p.alive) {
           this.actingIdx = 0;
-          this.proceedAction();
+          if (nativeContinuation) scheduleNativeProceedAction(this, 0);
+          else this.proceedAction();
           return;
         }
         AI.maybeUseSkill(this, p);
         const act = AI.decide(this, p);
-        this.applyAction(p, act);
+        if (nativeContinuation) {
+          const state = nativeStreamState(this);
+          if (state) state.nativeActionContinuation = nativeContinuation;
+          APPLY_ACTION_INTERNAL.call(this, p, act);
+        } else {
+          this.applyAction(p, act);
+        }
       });
     }
   }
@@ -605,7 +842,13 @@ export class Engine {
     if (!this.waitingIdx) return;
     const p = this.players[this.waitingIdx];
     this.waitingIdx = null;
-    this.applyAction(p, act);
+    if (consumeAwaitingNativeAction(this, p)) {
+      const state = nativeStreamState(this);
+      if (state) state.nativeActionContinuation = Object.freeze({ round: this.round, player: p });
+      APPLY_ACTION_INTERNAL.call(this, p, act);
+    } else {
+      this.applyAction(p, act);
+    }
   }
 
   applyAction(p, act) {
@@ -688,6 +931,12 @@ export class Engine {
       p.acted = true;
       p.lastActionBet = this.currentBet;
       emitAction('call', pay);
+      if (this.street === 'river') {
+        const prior = [...this.actionHistory].reverse().find((entry) =>
+          entry.round === this.round && entry.street === this.street
+          && entry.actorIdx !== p.idx && entry.isAggressive);
+        if (prior) p.skillData.riverCallBettorIdx = prior.actorIdx;
+      }
       this.log(`${name} 应战 ${pay}`, 'info');
     } else if (act.type === 'raise') {
       actionGroup = 'attack';
@@ -745,13 +994,24 @@ export class Engine {
       emitAction('allin', pay, raisesCurrentBet);
       this.emit('onQuote', p.idx, p.hero.lines.allin);
       this.log(`${name} 决死！押上全部 ${pay} 气血！`, 'allin');
+      if (p.hero.id === 'hanxin' && actorStackBefore <= Config.getBlinds(this.round).bb * 12) {
+        p.skillData.hanxinBackwater = true;
+      }
     }
+    if (this.skillsEnabled) notifySkillActionApplied(this, p, act);
     if (this.skillsEnabled) {
       dispatchSkillEvent(this, 'ACTION', {
         actor: p, type: act.type, group: actionGroup, activeCount: this.activePlayers().length,
       });
     }
-    this.delay(0.55, () => this.proceedAction());
+    const nativeState = nativeStreamState(this);
+    const nativeContinuation = nativeState?.nativeActionContinuation;
+    if (nativeContinuation && nativeContinuation.round === this.round && nativeContinuation.player === p) {
+      nativeState.nativeActionContinuation = null;
+      scheduleNativeProceedAction(this, 0.55);
+    } else {
+      this.delay(0.55, () => this.proceedAction());
+    }
   }
 
   // ---------------- 揭示天机 / 推进灌注轮 ----------------
@@ -763,16 +1023,26 @@ export class Engine {
     const playersWithChips = entrants.filter((p) => !p.allIn);
     if (playersWithChips.length > 1) return false;
     this.allInHandsRevealed = true;
+    const insuranceOpened = this.skillsEnabled ? openInsuranceOffer(this, entrants) : false;
     this.emit('onAllInReveal', entrants);
     this.log(`决死行动封闭，${entrants.map((p) => p.hero.name).join('、')}公开暗令`, 'show');
-    return true;
+    return insuranceOpened ? 'insurance' : true;
   }
 
   advanceStreet() {
+    const nativeTransition = !!nativeStreamState(this)?.actionDispatch;
     this.actingIdx = 0;
     this.actionCursorIdx = 0;
     this.waitingIdx = null;
-    this.revealAllInHandsIfClosed();
+    const revealState = this.revealAllInHandsIfClosed();
+    if (revealState === 'insurance' && hasOpenInsuranceWindow(this)) {
+      this.delay(6.2, () => ADVANCE_STREET_INTERNAL.call(this));
+      return;
+    }
+    const insuranceOffer = this.skillState?.insuranceOffer;
+    if (insuranceOffer && !insuranceOffer.secondTranche && !insuranceOffer.secondTranchePending) {
+      this.skillState.insuranceOffer = null;
+    }
     if (this.street !== 'river') {
       if (this.skillsEnabled) {
         dispatchSkillEvent(this, 'STREET_ADVANCE', {
@@ -822,11 +1092,16 @@ export class Engine {
     let canAct = 0;
     for (const p of this.activePlayers()) if (!p.allIn) canAct++;
     if (canAct <= 1) {
-      this.delay(1.6, () => this.advanceStreet());
+      const secondInsuranceWindow = !!this.skillState?.insuranceOffer?.secondTranche;
+      this.delay(secondInsuranceWindow ? 6.2 : 1.6, () => {
+        if (this.skillState?.insuranceOffer?.secondTranche) this.skillState.insuranceOffer = null;
+        ADVANCE_STREET_INTERNAL.call(this);
+      });
       return;
     }
     this.actionCursorIdx = this.dealerIdx;
-    this.delay(1.5, () => this.proceedAction());
+    if (nativeTransition) scheduleNativeProceedAction(this, 1.5);
+    else this.delay(1.5, () => this.proceedAction());
   }
 
   boardTextNew(street) {
@@ -855,12 +1130,11 @@ export class Engine {
     }
     p.hp += pot;
     this.emit('onHpChange', p.idx);
-    if (this.skillsEnabled) {
-      dispatchSkillEvent(this, 'UNCONTESTED_WIN', { winner: p });
-      dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'uncontested', winner: p });
-    }
-    this.emit('onPotAwarded', [p.idx], pot, true, 0, netWinnings);
-    this.log(`${p.hero.name} 兵不血刃，净赢 ${netWinnings[p.idx]}`, 'win');
+    const adjusted = this.skillsEnabled
+      ? settleSkillAdjustments(this, { mode: 'uncontested', netResult: netWinnings, wonAmount: { [p.idx]: pot } })
+      : { ledger: {}, netResult: netWinnings };
+    this.emit('onPotAwarded', [p.idx], pot, true, 0, adjusted.netResult);
+    this.log(`${p.hero.name} 兵不血刃，净赢 ${adjusted.netResult[p.idx]}`, 'win');
     this.delay(2.2, () => this.endRound());
   }
 
@@ -880,8 +1154,6 @@ export class Engine {
       const info = Config.HAND_NAMES[r.cat];
       p.showdownInfo = { score: r.score, cat: r.cat, best5: r.best5, name: info.name };
       this.log(`${p.hero.name} 亮招：${info.name}（${info.poker}）`, 'show');
-      p.energy++; // 参与亮招 +1⚡
-      this.emit('onEnergyChange', p.idx);
     }
 
     const potLayers = this.buildPots(entrants);
@@ -948,29 +1220,34 @@ export class Engine {
       }
     }
 
-    const entrantIds = new Set(entrants.map((p) => p.idx));
-    if (this.skillsEnabled) {
-      dispatchSkillEvent(this, 'SHOWDOWN_RESULT', {
-        entrants, entrantIds, winnerIds: winnersAll, wonAmount,
-      });
-      dispatchSkillEvent(this, 'ROUND_RESOLVED', { mode: 'showdown', winnerIds: winnersAll });
-    }
-
     const netResult = {};
     for (const p of this.players.slice(1)) {
       const contribution = Math.max(0, Number(p.betRound) || 0);
       const award = Math.max(0, Number(wonAmount[p.idx]) || 0);
       if (contribution > 0 || award > 0) netResult[p.idx] = award - contribution;
     }
+    const entrantIds = new Set(entrants.map((p) => p.idx));
+    if (this.skillsEnabled) {
+      dispatchSkillEvent(this, 'SHOWDOWN_RESULT', {
+        entrants, entrantIds, winnerIds: winnersAll, wonAmount, netResult,
+      });
+    }
+    const adjusted = this.skillsEnabled
+      ? settleSkillAdjustments(this, {
+        mode: 'showdown', entrants, entrantIds, winnerIds: winnersAll,
+        wonAmount, netResult, pots: potResults,
+      })
+      : { ledger: {}, netResult };
 
     this.emit('onShowdown', {
       entrants,
       wonAmount,
-      netResult,
+      netResult: adjusted.netResult,
+      skillAdjustments: adjusted.ledger,
       totalPot: pots.reduce((sum, pot) => sum + pot.amount, 0),
       pots: potResults,
     });
-    for (const [idx, net] of Object.entries(netResult)) {
+    for (const [idx, net] of Object.entries(adjusted.netResult)) {
       if (net > 0) this.log(`${this.players[Number(idx)].hero.name} 本回合净赢 ${net}`, 'win');
     }
 
@@ -1084,37 +1361,57 @@ export class Engine {
 
   extendTime(idx) {
     const p = this.players[idx];
-    if (p.energy >= Config.EXTEND_COST) {
+    const configured = p?.skillData?.currentExtendSeconds;
+    const extension = configured == null
+      ? Config.EXTEND_TIME
+      : Math.max(0, Number(configured) || 0);
+    if (p.energy >= Config.EXTEND_COST && extension > 0) {
       p.energy -= Config.EXTEND_COST;
+      if (p.skillData) p.skillData.currentExtendSeconds = 0;
       this.emit('onEnergyChange', idx);
-      this.log(`${p.hero.name} 消耗1⚡延长思考时间`, 'info');
-      return true;
+      this.log(`${p.hero.name} 消耗1⚡延长${extension}秒思考时间`, 'info');
+      return extension;
     }
-    return false;
+    return 0;
   }
 
   // ---------------- 技能系统 ----------------
 
-  canUseSkill(idx) {
+  canUseSkill(idx, skillId = null) {
     if (!this.skillsEnabled) return false;
     const p = this.players[idx];
-    return getSkillAvailability(this, p).ok;
+    return getSkillAvailability(this, p, skillId).ok;
   }
 
-  skillAvailability(idx) {
+  skillAvailability(idx, skillId = null) {
     if (!this.skillsEnabled) {
       return { ok: false, reason: '训练规则已关闭技能', skill: null, cost: 0 };
     }
-    return getSkillAvailability(this, this.players[idx]);
+    return getSkillAvailability(this, this.players[idx], skillId);
   }
 
-  getSkillPrompt(idx) {
+  getSkillPrompt(idx, skillId = null) {
     if (!this.skillsEnabled) return null;
-    return getSkillInput(this, this.players[idx]);
+    return getSkillInput(this, this.players[idx], skillId);
   }
 
-  useSkill(idx, selection = null) {
+  useSkill(idx, selection = null, skillId = null) {
     if (!this.skillsEnabled) return false;
-    return executeActiveSkill(this, this.players[idx], selection);
+    return executeActiveSkill(this, this.players[idx], selection, skillId);
   }
 }
+
+// Capture the unmodified state-machine methods at module initialization.  The
+// V375 scheduler calls these private references rather than public instance
+// properties, so a listener cannot replace requestAction/proceedAction and
+// manufacture an authorized decision boundary.
+PROCEED_ACTION_INTERNAL = Engine.prototype.proceedAction;
+REQUEST_ACTION_INTERNAL = Engine.prototype.requestAction;
+APPLY_ACTION_INTERNAL = Engine.prototype.applyAction;
+ADVANCE_STREET_INTERNAL = Engine.prototype.advanceStreet;
+
+// The collector owns its Engine in a closure. Freeze the shared prototype at
+// module initialization so another same-process caller cannot install a
+// wrapper (for example around startRound/emit) to capture that private Engine
+// reference before the collector's first immutable decision snapshot.
+Object.freeze(Engine.prototype);

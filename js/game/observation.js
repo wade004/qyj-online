@@ -5,8 +5,25 @@
 // cards from the start of a hand; a generic clone would therefore be a leak.
 
 import * as Config from './config.js';
+import {
+  assertNativeEngineInstance,
+  assertNativePurePokerDecisionBoundary,
+} from './engine.js';
 
 export const MAX_SUPPORTED_SEATS = 9;
+
+// A V375 collector must distinguish an immutable snapshot emitted by this
+// allow-listed projection from an arbitrary object that merely resembles one.
+// The provenance is process-local and non-serializable: it retains no Engine,
+// card, hero, seed, or skill reference.
+const PURE_POKER_OBSERVATION_PROVENANCE = new WeakMap();
+// The broader pure-poker marker above is intentionally available to ordinary
+// information-set consumers, including deterministic UI/test fixtures.  V375
+// profile collection has a stronger requirement: its snapshot must come from
+// an Engine instance registered by engine.js, not merely an Engine-shaped
+// object.  This process-local capability is never serialized.
+const NATIVE_PURE_POKER_OBSERVATION_PROVENANCE = new WeakMap();
+const NATIVE_PURE_POKER_DECISION_RECEIPTS = new WeakMap();
 
 const STREET_BOARD_LIMIT = Object.freeze({
   idle: 0,
@@ -44,12 +61,27 @@ function cloneCards(cards, limit = Infinity) {
 
 function cloneHero(hero) {
   if (!hero || typeof hero !== 'object') return null;
+  const declaredIds = (Array.isArray(hero.skillIds)
+    ? hero.skillIds
+    : [hero.skillIds?.active, hero.skillIds?.passive])
+    .filter((id) => typeof id === 'string');
+  const activeIds = (hero.skills?.actives || hero.skills?.all || [])
+    .filter((skill) => skill?.kind === 'active')
+    .map((skill) => skill.id)
+    .filter((id) => typeof id === 'string');
+  const passiveIds = (hero.skills?.passives || hero.skills?.all || [])
+    .filter((skill) => skill?.kind === 'passive')
+    .map((skill) => skill.id)
+    .filter((id) => typeof id === 'string');
   return {
     id: typeof hero.id === 'string' ? hero.id : null,
     name: typeof hero.name === 'string' ? hero.name : null,
     skillIds: {
-      active: typeof hero.skillIds?.active === 'string' ? hero.skillIds.active : null,
-      passive: typeof hero.skillIds?.passive === 'string' ? hero.skillIds.passive : null,
+      all: declaredIds,
+      actives: activeIds,
+      passives: passiveIds,
+      active: activeIds[0] || null,
+      passive: passiveIds[0] || null,
     },
   };
 }
@@ -64,29 +96,16 @@ function cloneLastAction(action) {
   };
 }
 
-function clonePublicPlayer(player, position) {
-  const skillModifiers = (Array.isArray(player.skillStatuses) ? player.skillStatuses : [])
-    .filter((status) => status && typeof status.modifier === 'string')
-    .map((status) => ({
-      modifier: status.modifier,
-      amount: asNumber(status.amount),
-    }));
-  const revealedCard = cloneCard(player.skillData?.revealedCard);
-  const showdown = player.showdownInfo && typeof player.showdownInfo === 'object'
-    ? {
-      name: typeof player.showdownInfo.name === 'string' ? player.showdownInfo.name : null,
-      cat: optionalNumber(player.showdownInfo.cat),
-    }
-    : null;
-  return {
+function clonePublicPlayer(player, position, { purePoker = false } = {}) {
+  // A pure-poker policy must not even receive stable identity/skill-adjacent
+  // fields.  In particular, a hero name can be a proxy for a hero id, and
+  // energy/skill status can turn an otherwise ordinary poker model into a
+  // skill-conditioned model.  Build the common public poker snapshot first
+  // and add the richer game-mode fields only for skills-enabled observations.
+  const pokerSnapshot = {
     idx: asNumber(player.idx),
-    playerName: typeof player.playerName === 'string' ? player.playerName : null,
-    playerId: typeof player.playerId === 'string' ? player.playerId : null,
-    isHuman: !!player.isHuman,
-    hero: cloneHero(player.hero),
     position,
     hp: asNumber(player.hp),
-    energy: asNumber(player.energy),
     alive: !!player.alive,
     folded: !!player.folded,
     allIn: !!player.allIn,
@@ -94,10 +113,32 @@ function clonePublicPlayer(player, position) {
     betRound: asNumber(player.betRound),
     acted: !!player.acted,
     lastAction: cloneLastAction(player.lastAction),
+    showdown: player.showdownInfo && typeof player.showdownInfo === 'object'
+      ? {
+        name: typeof player.showdownInfo.name === 'string' ? player.showdownInfo.name : null,
+        cat: optionalNumber(player.showdownInfo.cat),
+      }
+      : null,
+  };
+  if (purePoker) return pokerSnapshot;
+
+  const skillModifiers = (Array.isArray(player.skillStatuses) ? player.skillStatuses : [])
+    .filter((status) => status && typeof status.modifier === 'string')
+    .map((status) => ({
+      modifier: status.modifier,
+      amount: asNumber(status.amount),
+    }));
+  const revealedCard = cloneCard(player.skillData?.revealedCard);
+  return {
+    ...pokerSnapshot,
+    playerName: typeof player.playerName === 'string' ? player.playerName : null,
+    playerId: typeof player.playerId === 'string' ? player.playerId : null,
+    isHuman: !!player.isHuman,
+    hero: cloneHero(player.hero),
+    energy: asNumber(player.energy),
     skillUsed: !!player.skillUsed,
     skillModifiers,
     publicRevealedCard: revealedCard,
-    showdown,
   };
 }
 
@@ -235,6 +276,22 @@ export function buildObservation(engine, player) {
   if (!Number.isInteger(observerIdx) || observerIdx < 1 || !observer) {
     throw new RangeError('buildObservation requires a valid observer seat');
   }
+  // `false` is the only accepted pure-poker state.  It is intentionally
+  // narrow: an Engine-like object that omits the flag keeps the normal game
+  // projection rather than silently being treated as skill-free.
+  const purePoker = engine.skillsEnabled === false;
+  let nativeEngine = false;
+  if (purePoker) {
+    try {
+      assertNativeEngineInstance(engine);
+      nativeEngine = true;
+    } catch (error) {
+      // The public observation projection deliberately continues to support
+      // Engine-like fixtures.  They receive only the ordinary pure-poker
+      // marker; V375's strict collector entry point below refuses them.
+      if (!(error instanceof RangeError)) throw error;
+    }
+  }
 
   const occupiedPlayers = engine.players.slice(1).filter(Boolean);
   const highestSeat = occupiedPlayers.reduce(
@@ -266,11 +323,15 @@ export function buildObservation(engine, player) {
     players[idx] = clonePublicPlayer(
       candidate,
       positionForSeat(idx, dealerIdx, handSeats),
+      { purePoker },
     );
   }
 
-  const hasPrivateKnowledgeStore = Array.isArray(engine.privateSkillKnowledge);
-  const hasPublicKnowledgeStore = Array.isArray(engine.publicSkillKnowledge);
+  // Preserve a stable, empty knowledge interface for the ordinary AI, but do
+  // not read any skill store when a caller explicitly selected pure poker.
+  // This makes a stale/malicious Engine skill payload observationally inert.
+  const hasPrivateKnowledgeStore = !purePoker && Array.isArray(engine.privateSkillKnowledge);
+  const hasPublicKnowledgeStore = !purePoker && Array.isArray(engine.publicSkillKnowledge);
   const privateSkillResults = hasPrivateKnowledgeStore
     ? (engine.privateSkillKnowledge[observerIdx] || []).map(clonePrivateKnowledge)
     : [];
@@ -290,7 +351,18 @@ export function buildObservation(engine, player) {
     version: 1,
     observerIdx,
     seatCount: occupiedPlayers.length,
+    // `seatCount` is the currently occupied/visible count and can shrink late
+    // in a tournament.  Keep the configured table size separately so an
+    // offline pure-poker collector cannot silently reinterpret a short-handed
+    // 6-max table as 9-max (or vice versa).
+    tableSize: Number.isSafeInteger(Number(engine.tableSize))
+      ? Number(engine.tableSize) : occupiedPlayers.length,
     maxSupportedSeats: MAX_SUPPORTED_SEATS,
+    // These are explicit boundary sentinels for consumers that must reject
+    // non-pure observations.  They are not strategy features: a pure-poker
+    // projection always carries exactly false/null and V375 discards them.
+    skillsEnabled: purePoker ? false : true,
+    skillSchemaVersion: purePoker ? null : 'qyj-current-hero-skill-schema',
     round,
     street,
     dealerIdx,
@@ -322,18 +394,110 @@ export function buildObservation(engine, player) {
       privateSkillResults,
       publicSkillResults,
       persistence: {
-        privateSkillResults: hasPrivateKnowledgeStore
+        privateSkillResults: purePoker
+          ? 'disabled-by-pure-poker-projection'
+          : hasPrivateKnowledgeStore
           ? 'complete-since-engine-construction'
           : 'unavailable',
-        publicSkillResults: hasPublicKnowledgeStore
+        publicSkillResults: purePoker
+          ? 'disabled-by-pure-poker-projection'
+          : hasPublicKnowledgeStore
           ? 'complete-since-engine-construction'
           : 'unavailable',
-        gap: hasPrivateKnowledgeStore && hasPublicKnowledgeStore
+        gap: purePoker || (hasPrivateKnowledgeStore && hasPublicKnowledgeStore)
           ? null
           : 'This Engine-like state does not persist one or more skill-result event streams.',
       },
     },
   };
 
-  return deepFreeze(observation);
+  const frozen = deepFreeze(observation);
+  if (purePoker) {
+    const provenance = Object.freeze({
+      tableSize: frozen.tableSize,
+      round: frozen.round,
+      skillsEnabled: false,
+      skillSchemaVersion: null,
+    });
+    PURE_POKER_OBSERVATION_PROVENANCE.set(frozen, provenance);
+    if (nativeEngine) NATIVE_PURE_POKER_OBSERVATION_PROVENANCE.set(frozen, provenance);
+  }
+  return frozen;
+}
+
+/**
+ * Engine-only capture path for V375.  The Engine creates the immutable
+ * information set before notifying any listener, then passes this snapshot to
+ * the callback.  Ordinary buildObservation() calls intentionally never gain a
+ * decision receipt, even if made while a callback is running.
+ */
+export function captureNativePurePokerDecisionObservation(engine, player, boundary) {
+  const observerIdx = Number(typeof player === 'object' ? player?.idx : player);
+  const verifiedBoundary = assertNativePurePokerDecisionBoundary(engine, observerIdx, boundary);
+  const frozen = buildObservation(engine, observerIdx);
+  if (frozen.tableSize !== verifiedBoundary.tableSize
+    || frozen.observerIdx !== verifiedBoundary.observerIdx
+    || frozen.round !== verifiedBoundary.round
+    || frozen.street !== verifiedBoundary.street) {
+    throw new RangeError('Native pure-poker decision snapshot diverged before callback dispatch');
+  }
+  NATIVE_PURE_POKER_DECISION_RECEIPTS.set(frozen, Object.freeze({
+    decisionReceipt: verifiedBoundary.decisionReceipt,
+    chanceStreamReceipt: verifiedBoundary.chanceStreamReceipt,
+    collectorBinding: verifiedBoundary.collectorBinding,
+    tableSize: verifiedBoundary.tableSize,
+    observerIdx: verifiedBoundary.observerIdx,
+    round: verifiedBoundary.round,
+    street: verifiedBoundary.street,
+    sequence: verifiedBoundary.sequence,
+  }));
+  return frozen;
+}
+
+/**
+ * Assert that an Observation was emitted by the local pure-poker projection.
+ * This is intentionally a WeakMap capability rather than a serializable flag:
+ * a plain JSON object cannot impersonate a native V375 decision snapshot.
+ */
+export function assertPurePokerObservationSnapshot(observation) {
+  const provenance = PURE_POKER_OBSERVATION_PROVENANCE.get(observation);
+  if (!provenance || observation?.skillsEnabled !== false
+    || observation?.skillSchemaVersion !== null
+    || observation?.tableSize !== provenance.tableSize
+    || observation?.round !== provenance.round) {
+    throw new RangeError('Observation is not a trusted local pure-poker snapshot');
+  }
+  return provenance;
+}
+
+/**
+ * Assert the stronger V375 collector boundary: a local pure-poker snapshot
+ * must also originate from an Engine-created instance.  This rejects plain
+ * JSON, arbitrary Engine-like fixtures, and snapshots with separately forged
+ * legal-action objects before any aggregate profile can be formed.
+ */
+export function assertNativePurePokerObservationSnapshot(observation) {
+  const provenance = assertPurePokerObservationSnapshot(observation);
+  if (!NATIVE_PURE_POKER_OBSERVATION_PROVENANCE.has(observation)) {
+    throw new RangeError('Observation is not a trusted native Engine pure-poker snapshot');
+  }
+  return provenance;
+}
+
+/**
+ * Return the opaque receipt attached only when buildObservation() ran inside
+ * Engine's synchronous pure-poker action-dispatch callback.  It contains no
+ * cards, seats, identity, seed, or serializable chance data.  V375 consumes
+ * it exactly once to prove an actual native decision boundary.
+ */
+export function nativePurePokerDecisionReceipt(observation) {
+  assertNativePurePokerObservationSnapshot(observation);
+  const receipt = NATIVE_PURE_POKER_DECISION_RECEIPTS.get(observation);
+  if (!receipt || receipt.tableSize !== observation.tableSize
+    || receipt.observerIdx !== observation.observerIdx
+    || receipt.round !== observation.round
+    || receipt.street !== observation.street) {
+    throw new RangeError('Observation was not captured at a native pure-poker decision callback');
+  }
+  return receipt;
 }

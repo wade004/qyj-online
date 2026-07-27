@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "stylePrefix": "short premium sound effect for a Chinese historical strategy poker game, dry studio mix, no speech, no music bed, no crowd, crisp transient, polished mobile game audio",
+  "defaults": {
+    "candidates": 6,
+    "sampleRate": 44100,
+    "bitrate": "128k",
+    "targetLufs": -18,
+    "truePeakDb": -1.5
+  },
+  "events": [
+    {
+      "id": "draw",
+      "target": "assets/audio/effect/draw.mp3",
+      "duration": 0.55,
+      "prompt": "two lacquered playing cards slide across a walnut table, subtle silk friction, light jade click, elegant and quick",
+      "variants": ["restrained", "slightly brighter", "deeper wood" ]
+    },
+    {
+      "id": "drawx",
+      "target": "assets/audio/effect/drawx.mp3",
+      "duration": 0.8,
+      "prompt": "five lacquered playing cards dealt in a fast ceremonial flourish, layered card swishes, controlled jade accents",
+      "variants": ["restrained", "slightly brighter", "deeper wood" ]
+    },
+    {
+      "id": "discard",
+      "target": "assets/audio/effect/discard.mp3",
+      "duration": 0.42,
+      "prompt": "one playing card placed firmly face down on a felt table, soft paper slap, decisive but not harsh",
+      "variants": ["restrained", "slightly brighter", "deeper wood" ]
+    },
+    {
+      "id": "damage",
+      "target": "assets/audio/effect/damage.mp3",
+      "duration": 0.5,
+      "prompt": "small stack of bronze poker chips struck and scattered, tense metallic clink, clean impact",
+      "variants": ["restrained", "slightly brighter", "deeper bronze" ]
+    },
+    {
+      "id": "recover",
+      "target": "assets/audio/effect/recover.mp3",
+      "duration": 0.7,
+      "prompt": "poker chips gathered into a neat stack, warm jade chime, quiet feeling of recovery and control",
+      "variants": ["restrained", "slightly brighter", "deeper jade" ]
+    },
+    {
+      "id": "judge",
+      "target": "assets/audio/effect/judge.mp3",
+      "duration": 0.85,
+      "prompt": "ancient bronze seal pressed onto silk, low ceremonial thump, brief suspenseful jade resonance",
+      "variants": ["restrained", "slightly brighter", "deeper bronze" ]
+    },
+    {
+      "id": "link",
+      "target": "assets/audio/effect/link.mp3",
+      "duration": 0.7,
+      "prompt": "two jade tokens connect with a clean magical thread, elegant glassy chime, tactical and precise",
+      "variants": ["restrained", "slightly brighter", "deeper jade" ]
+    },
+    {
+      "id": "equip1",
+      "target": "assets/audio/effect/equip1.mp3",
+      "duration": 0.75,
+      "prompt": "a bronze strategy token locks into place, compact mechanical click, subtle Chinese ceremonial accent",
+      "variants": ["restrained", "slightly brighter", "deeper bronze" ]
+    },
+    {
+      "id": "equip2",
+      "target": "assets/audio/effect/equip2.mp3",
+      "duration": 0.9,
+      "prompt": "an ancient weapon talisman activates, short bronze shimmer and jade spark, no explosive boom",
+      "variants": ["restrained", "slightly brighter", "deeper bronze" ]
+    },
+    {
+      "id": "win",
+      "target": "assets/audio/effect/win.mp3",
+      "duration": 1.35,
+      "prompt": "victory poker pot collected, rising bronze and jade flourish, confident Chinese historical strategy game reward, concise",
+      "variants": ["restrained", "more celebratory", "deeper bronze" ]
+    },
+    {
+      "id": "lose",
+      "target": "assets/audio/effect/lose.mp3",
+      "duration": 1.1,
+      "prompt": "lost poker hand, a few bronze chips settle on felt, low muted gong tail, dignified setback without sadness",
+      "variants": ["restrained", "more muted", "deeper wood" ]
+    }
+  ]
+}

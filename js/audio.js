@@ -45,6 +45,7 @@ let bgmEnabled = !masterMuted;
 let sfxEnabled = !masterMuted;
 let currentTrack = 0;
 const activeSfx = new Set();
+let activeVoice = null;
 
 // 预加载音效（减少首次延迟）
 const sfxCache = {};
@@ -110,6 +111,43 @@ function stopActiveSFX() {
   activeSfx.clear();
 }
 
+/** Browser-native character voice. It deliberately follows the master mute state. */
+export function speakCharacterLine(text, {
+  gender = 'male', role = 'control', intensity = 'medium',
+} = {}) {
+  if (!sfxEnabled || !text || typeof speechSynthesis === 'undefined'
+    || typeof SpeechSynthesisUtterance === 'undefined') return false;
+  try {
+    if (activeVoice) speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(String(text));
+    utterance.lang = 'zh-CN';
+    const voices = speechSynthesis.getVoices?.() || [];
+    const chinese = voices.filter((voice) => /^zh/i.test(voice.lang || ''));
+    const preferred = chinese.find((voice) => (
+      gender === 'female'
+        ? /female|xiaoxiao|huihui|yaoyao|tingting|女/i.test(voice.name)
+        : /male|yunxi|kangkang|yunyang|男/i.test(voice.name)
+    )) || chinese[0];
+    if (preferred) utterance.voice = preferred;
+    const forceful = ['attack', 'pressure', 'taunt', 'bluff'].includes(role);
+    const calm = ['defense', 'control', 'read', 'prediction', 'mystic'].includes(role);
+    const deceptive = role === 'trick';
+    utterance.rate = forceful ? 1.08 : calm ? 0.9 : deceptive ? 0.94 : 0.98;
+    utterance.pitch = gender === 'female'
+      ? (forceful ? 1.12 : deceptive ? 1.08 : 1.2)
+      : (forceful ? 0.82 : deceptive ? 0.78 : 0.92);
+    utterance.volume = intensity === 'high' ? 1 : 0.88;
+    utterance.onend = () => { if (activeVoice === utterance) activeVoice = null; };
+    utterance.onerror = utterance.onend;
+    activeVoice = utterance;
+    speechSynthesis.speak(utterance);
+    return true;
+  } catch {
+    activeVoice = null;
+    return false;
+  }
+}
+
 export function setMuted(muted) {
   masterMuted = !!muted;
   bgmEnabled = !masterMuted;
@@ -118,6 +156,8 @@ export function setMuted(muted) {
   if (masterMuted) {
     stopBGM();
     stopActiveSFX();
+    try { speechSynthesis?.cancel?.(); } catch {}
+    activeVoice = null;
   } else if (initialized) {
     playBGM(currentTrack);
   }

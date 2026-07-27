@@ -1,14 +1,52 @@
 import assert from 'node:assert/strict';
 
 import { describe, isPlayerMadeStrongHand } from '../js/game/handeval.js';
+import { HEROES } from '../js/game/heroes.js';
 import {
   classifyH5HandHit,
   classifyH5PremiumStartingHand,
+  h5HeroSkillSlots,
+  h5SkillSlotIndex,
   shouldRenderH5PortraitReveal,
 } from '../js/ui/h5/battle-view.js';
 import { isH5ViewportUsable } from '../js/ui/h5/orientation-gate.js';
 
 const card = (rank, suit) => ({ rank, suit });
+
+const heroSkillGolden = {
+  zhugeliang: [['zhugeliang_guanxing', 'active'], ['zhugeliang_kongcheng', 'active']],
+  diaochan: [['diaochan_lianhuan', 'active'], ['diaochan_biyue', 'passive']],
+  hanxin: [['hanxin_andu', 'active'], ['hanxin_beishui', 'passive']],
+  xiangyu: [['xiangyu_pofu', 'active'], ['xiangyu_bawang', 'passive']],
+  lvbuwei: [['lvbuwei_qihuo', 'active'], ['lvbuwei_shangdao', 'active']],
+  lianpo: [['lianpo_jianbi', 'passive'], ['lianpo_laolian', 'passive']],
+  wuzetian: [['wuzetian_linchao', 'active'], ['wuzetian_zhiheng', 'passive']],
+  huamulan: [['huamulan_yizhuang', 'active'], ['huamulan_bianzhen', 'passive']],
+  xishi: [['xishi_huansha', 'active'], ['xishi_chenyu', 'passive']],
+  wangzhaojun: [['wangzhaojun_zhige', 'active'], ['wangzhaojun_heming', 'passive']],
+  shangguanwaner: [['shangguanwaner_luobi', 'active'], ['shangguanwaner_wenxin', 'passive']],
+  liqingzhao: [['liqingzhao_rumeng', 'active'], ['liqingzhao_shengsheng', 'passive']],
+  fuhao: [['fuhao_zhenbu', 'active'], ['fuhao_zhengfa', 'passive']],
+  muguiying: [['muguiying_pozhen', 'active'], ['muguiying_guashuai', 'passive']],
+  nvwa: [['nvwa_zaohua', 'active'], ['nvwa_butian', 'passive']],
+  change: [['change_qinghui', 'active'], ['change_yueyin', 'passive']],
+};
+
+for (const hero of HEROES) {
+  const slots = h5HeroSkillSlots(hero);
+  assert.deepEqual(
+    slots.map((skill) => [skill.id, skill.kind]),
+    heroSkillGolden[hero.id],
+    `${hero.name} H5 skill slots must preserve the authoritative kind and active-first order`,
+  );
+  slots.forEach((skill, slot) => {
+    assert.equal(
+      h5SkillSlotIndex(hero, skill.id),
+      slot,
+      `${hero.name} ${skill.name} must resolve to its visible skill icon`,
+    );
+  });
+}
 
 assert.equal(isH5ViewportUsable({
   width: 874, height: 402, landscape: true, textEntry: false,

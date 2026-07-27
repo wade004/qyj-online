@@ -2,7 +2,7 @@ import * as Config from '../../game/config.js';
 import * as Advisor from '../../game/advisor.js';
 import { cardText } from '../../game/engine.js';
 import { describe, isPlayerMadeStrongHand } from '../../game/handeval.js';
-import { playSFX } from '../../audio.js';
+import { playSFX, speakCharacterLine } from '../../audio.js';
 import {
   H5_CARD_BACK,
   H5_CARD_FACES,
@@ -21,17 +21,67 @@ const STREET_FEEDBACK_LABELS = Object.freeze({
 });
 
 const cardSignature = (card) => `${card?.rank || 0}:${card?.suit || 0}`;
-const UNIFIED_SKILL_GLYPH = '技';
+const skillKindLabel = (skill) => (skill?.kind === 'active' ? '主动' : '被动');
+const skillKindGlyph = (skill) => (skill?.kind === 'active' ? '主' : '被');
+const skillConditionLabel = (skill) => (
+  skill?.kind === 'active' ? '发动条件' : '触发条件'
+);
+
+/**
+ * The declared order remains authoritative within the same kind, while the
+ * battle UI always puts active skills before passive skills. This keeps the
+ * top/bottom icon contract correct for mixed, double-active and double-passive
+ * heroes alike.
+ */
+export function h5HeroSkillSlots(hero) {
+  return [...(hero?.skills?.display || hero?.skills?.all || [])]
+    .filter(Boolean)
+    .map((skill, declaredIndex) => ({ skill, declaredIndex }))
+    .sort((left, right) => {
+      const leftRank = left.skill.kind === 'active' ? 0 : 1;
+      const rightRank = right.skill.kind === 'active' ? 0 : 1;
+      return leftRank - rightRank || left.declaredIndex - right.declaredIndex;
+    })
+    .map(({ skill }) => skill);
+}
+
+export function h5SkillSlotIndex(hero, skillId) {
+  return h5HeroSkillSlots(hero).findIndex((skill) => skill.id === skillId);
+}
+
+function focusedHeroSkills(hero, focusedSkillId = '') {
+  const skills = h5HeroSkillSlots(hero);
+  // Keep the visual slot order stable: active skills stay before passive
+  // skills even when the lower icon opened the preview. The selected skill is
+  // emphasized via `is-focused` instead of moving to another column.
+  void focusedSkillId;
+  return skills;
+}
+
 const heroSkillTooltip = (hero) => {
-  const active = hero?.skills?.active;
-  const passive = hero?.skills?.passive;
-  return [
-    `主动【${active?.name || hero?.skillName || '未知'}】${active?.cost ?? hero?.skillCost ?? 0}⚡`,
-    active?.description || hero?.skillDesc || '',
-    `条件：${active?.conditionDescription || hero?.condDesc || '满足技能发动条件'}`,
-    `被动【${passive?.name || '未知'}】${passive?.description || hero?.passiveDesc || ''}`,
-  ].filter(Boolean).join(' · ');
+  return h5HeroSkillSlots(hero).map((item) => [
+    `${skillKindLabel(item)}【${item.name}】${item.limited ? '·限定技' : ''}`,
+    item.description,
+    `${skillConditionLabel(item)}：${item.conditionDescription || '满足技能条件'}`,
+  ].join(' · ')).join('　｜　');
 };
+const heroSkillDisplayItems = (hero, focusedSkillId = '') =>
+  focusedHeroSkills(hero, focusedSkillId).map((item) =>
+  element('article', {
+    className: `h5-unified-skill-display__item is-${item.kind}${item.id === focusedSkillId ? ' is-focused' : ''}`,
+    attrs: {
+      'data-skill-id': item.id || '',
+      'data-skill-kind': item.kind || '',
+    },
+  }, [
+    element('strong', {
+      text: `${skillKindLabel(item)}【${item.name}】${item.limited ? '·限定技' : ''}`,
+    }),
+    element('span', { text: item.description }),
+    element('small', {
+      text: `${skillConditionLabel(item)}：${item.conditionDescription || '满足技能条件'}`,
+    }),
+  ]));
 const h5HandEffectTier = (category) => (
   category >= 7 ? 'legendary' : category >= 4 ? 'strong' : 'made'
 );
@@ -492,7 +542,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
     attrs: { 'data-player-count': String(playerCount) },
   });
   const skillHoverPreview = element('aside', {
-    className: 'h5-seat-skill-preview',
+    className: 'h5-seat-skill-preview h5-unified-skill-display',
     attrs: {
       hidden: true,
       role: 'tooltip',
@@ -553,25 +603,33 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
       text: '未发动',
       attrs: { 'aria-hidden': 'true' },
     });
+    const seatSkills = h5HeroSkillSlots(player.hero);
+    const seatPrimarySkill = seatSkills[0] || player.hero.skills?.active;
+    const seatSecondarySkill = seatSkills[1] || player.hero.skills?.passive;
     const skillIcon = button('', {
-      className: 'h5-seat__skill',
+      className: `h5-seat__skill h5-seat__skill--primary is-${seatPrimarySkill?.kind || 'unknown'}`,
       attrs: {
-        'aria-label': `查看${player.hero.name}技能：${player.hero.skillName}`,
+        'aria-label': `${seatPrimarySkill?.kind === 'active' ? '查看或发动' : '查看'}${player.hero.name}技能：${seatPrimarySkill?.name || player.hero.skillName}`,
         'data-testid': `h5-seat-skill-${idx}`,
+        'data-skill-id': seatPrimarySkill?.id || '',
+        'data-skill-kind': seatPrimarySkill?.kind || '',
+        'data-skill-state': seatPrimarySkill?.kind === 'active' ? 'idle' : 'passive',
       },
     }, [
-      element('span', { className: 'h5-seat__skill-glyph', text: '主' }),
+      element('span', { className: 'h5-seat__skill-glyph', text: skillKindGlyph(seatPrimarySkill) }),
       skillStatus,
     ]);
     const passiveSkillIcon = button('', {
-      className: 'h5-seat__skill h5-seat__skill--passive',
+      className: `h5-seat__skill h5-seat__skill--secondary is-${seatSecondarySkill?.kind || 'unknown'}`,
       attrs: {
-        'aria-label': `查看${player.hero.name}被动技能：${player.hero.skills?.passive?.name || '被动'}`,
+        'aria-label': `${seatSecondarySkill?.kind === 'active' ? '查看或发动' : '查看'}${player.hero.name}技能：${seatSecondarySkill?.name || '技能'}`,
         'data-testid': `h5-seat-passive-skill-${idx}`,
-        'data-skill-state': 'passive',
+        'data-skill-id': seatSecondarySkill?.id || '',
+        'data-skill-kind': seatSecondarySkill?.kind || '',
+        'data-skill-state': seatSecondarySkill?.kind === 'active' ? 'idle' : 'passive',
       },
     }, [
-      element('span', { className: 'h5-seat__skill-glyph', text: '被' }),
+      element('span', { className: 'h5-seat__skill-glyph', text: skillKindGlyph(seatSecondarySkill) }),
     ]);
     seat.append(
       profileHit,
@@ -631,19 +689,24 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
     className: 'h5-me__skill-state h5-visually-hidden',
     attrs: { 'data-testid': 'h5-skill-state', 'aria-live': 'polite' },
   });
+  const mySkillSlots = h5HeroSkillSlots(me.hero);
+  const primarySkill = mySkillSlots[0] || me.hero.skills?.active || me.hero.skills?.passive;
+  const secondSkill = mySkillSlots[1] || me.hero.skills?.passive;
   const skillName = element('strong', {
-    className: 'h5-skill-button__name', text: me.hero.skillName,
+    className: 'h5-skill-button__name', text: primarySkill?.name || me.hero.skillName,
     attrs: { 'data-testid': 'h5-skill-name' },
   });
   const mySkillIcon = element('span', {
-    className: 'h5-skill-button__icon', text: '主',
+    className: 'h5-skill-button__icon', text: skillKindGlyph(primarySkill),
     attrs: { 'data-testid': 'h5-skill-icon', 'aria-hidden': 'true' },
   });
   const skillButton = button('', {
-    className: 'h5-skill-button',
+    className: `h5-skill-button h5-skill-button--primary is-${primarySkill?.kind || 'unknown'}`,
     attrs: {
       'aria-disabled': 'true',
       'data-testid': 'h5-use-skill',
+      'data-skill-id': primarySkill?.id || '',
+      'data-skill-kind': primarySkill?.kind || '',
       'data-tooltip': heroSkillTooltip(me.hero),
       title: heroSkillTooltip(me.hero),
     },
@@ -651,18 +714,19 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
     mySkillIcon,
     element('span', { className: 'h5-skill-button__body' }, [skillName]),
   ]);
-  const passive = me.hero.skills?.passive;
   const passiveButton = button('', {
-    className: 'h5-passive-button',
+    className: `h5-passive-button h5-skill-button--secondary is-${secondSkill?.kind || 'unknown'}`,
     attrs: {
       'data-testid': 'h5-passive-skill',
-      'aria-label': `查看被动技能：${passive?.name || '被动'}`,
-      title: `被动【${passive?.name || '未知'}】${passive?.description || me.hero.passiveDesc || ''}`,
+      'data-skill-id': secondSkill?.id || '',
+      'data-skill-kind': secondSkill?.kind || '',
+      'aria-label': `${secondSkill?.kind === 'active' ? '发动' : '查看'}技能：${secondSkill?.name || '技能'}`,
+      title: `${secondSkill?.kind === 'active' ? '主动' : '被动'}【${secondSkill?.name || '未知'}】${secondSkill?.description || ''}`,
     },
   }, [
-    element('span', { className: 'h5-passive-button__icon', text: '被' }),
+    element('span', { className: 'h5-passive-button__icon', text: skillKindGlyph(secondSkill) }),
     element('span', { className: 'h5-passive-button__body' }, [
-      element('strong', { text: passive?.name || '被动' }),
+      element('strong', { text: secondSkill?.name || '技能' }),
     ]),
   ]);
   const myPortrait = element('span', {
@@ -968,67 +1032,137 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
       ...playerStatsContent(player, `h5-seat-stats-${idx}`),
       element('details', { className: 'h5-player-skill-details' }, [
         element('summary', { text: '查看武将技能' }),
-        element('dl', { className: 'h5-info-list' }, [
-          element('div', {}, [element('dt', { text: '主动' }), element('dd', { text: `${player.hero.skillName} · ${player.hero.skillCost}⚡` })]),
-        ]),
-        element('p', { text: player.hero.skillDesc }),
-        element('small', { text: `条件：${player.hero.condDesc}` }),
-        element('h3', { text: '被动' }),
-        element('p', { text: player.hero.passiveDesc }),
+        element('div', {
+          className: 'h5-unified-skill-display h5-unified-skill-display--drawer',
+        }, heroSkillDisplayItems(player.hero)),
       ]),
     ], 'h5-drawer--info h5-drawer--player-stats', { 'data-testid': 'h5-player-stats-panel' });
   }
-  function showSkills(idx) {
-    const player = players[idx];
-    if (!player) return;
-    const active = player.hero.skills?.active;
-    const passiveSkill = player.hero.skills?.passive;
-    openDrawer(`${player.hero.name} · 武将技能`, [
-      element('section', { className: 'h5-skill-detail-card is-active' }, [
-        element('span', { className: 'h5-skill-detail-card__icon', text: UNIFIED_SKILL_GLYPH }),
-        element('div', {}, [
-          element('small', { text: '主动技能' }),
-          element('h3', { text: `${active?.name || player.hero.skillName} · ${active?.cost ?? player.hero.skillCost}⚡` }),
-          element('p', { text: active?.description || player.hero.skillDesc }),
-          element('em', { text: `条件：${active?.conditionDescription || player.hero.condDesc}` }),
-        ]),
-      ]),
-      element('section', { className: 'h5-skill-detail-card is-passive' }, [
-        element('span', { className: 'h5-skill-detail-card__icon', text: UNIFIED_SKILL_GLYPH }),
-        element('div', {}, [
-          element('small', { text: '被动技能' }),
-          element('h3', { text: passiveSkill?.name || '被动' }),
-          element('p', { text: passiveSkill?.description || player.hero.passiveDesc }),
-        ]),
-      ]),
-    ], 'h5-drawer--info h5-drawer--skills', { 'data-testid': 'h5-skill-detail-panel' });
-  }
-  function showSkillHoverPreview(idx, anchor) {
+  let skillPreviewPinned = false;
+  let skillPreviewAnchor = null;
+  function showSkillHoverPreview(idx, anchor, { pinned = false } = {}) {
     const player = players[idx];
     if (!player || !anchor) return;
-    skillHoverPreview.textContent = heroSkillTooltip(player.hero);
+    if (skillPreviewPinned && !pinned
+      && (skillHoverPreview.dataset.playerIdx !== String(idx) || skillPreviewAnchor !== anchor)) return;
+    if (skillPreviewAnchor && skillPreviewAnchor !== anchor) {
+      skillPreviewAnchor.setAttribute('aria-expanded', 'false');
+    }
+    const focusedSkillId = anchor.dataset.skillId || '';
+    skillHoverPreview.replaceChildren(...heroSkillDisplayItems(player.hero, focusedSkillId));
     skillHoverPreview.dataset.playerIdx = String(idx);
+    skillHoverPreview.dataset.focusedSkillId = focusedSkillId;
+    skillHoverPreview.setAttribute('aria-label', `${player.hero.name}技能：${heroSkillTooltip(player.hero)}`);
+    skillPreviewPinned = pinned;
+    skillPreviewAnchor = anchor;
+    anchor.setAttribute('aria-expanded', 'true');
+    skillHoverPreview.classList.toggle('is-pinned', pinned);
     skillHoverPreview.hidden = false;
     const tableRect = table.getBoundingClientRect();
     const anchorRect = anchor.getBoundingClientRect();
     const previewRect = skillHoverPreview.getBoundingClientRect();
+    // The whole H5 stage is responsively transformed. getBoundingClientRect()
+    // returns visual pixels while absolute positioning inside the table expects
+    // unscaled CSS pixels, so convert every measurement back to table space.
+    const scaleX = tableRect.width / Math.max(1, table.offsetWidth);
+    const scaleY = tableRect.height / Math.max(1, table.offsetHeight);
+    const tableWidth = table.offsetWidth;
+    const tableHeight = table.offsetHeight;
+    const anchorLeft = (anchorRect.left - tableRect.left) / scaleX;
+    const anchorTop = (anchorRect.top - tableRect.top) / scaleY;
+    const anchorWidth = anchorRect.width / scaleX;
+    const anchorHeight = anchorRect.height / scaleY;
+    const previewWidth = previewRect.width / scaleX;
+    const previewHeight = previewRect.height / scaleY;
     const gap = 6;
-    const width = Math.min(previewRect.width || 300, Math.max(160, tableRect.width - 16));
-    const left = Math.max(8, Math.min(
-      tableRect.width - width - 8,
-      anchorRect.left - tableRect.left + anchorRect.width / 2 - width / 2,
-    ));
-    const below = anchorRect.bottom - tableRect.top + gap;
-    const top = below + (previewRect.height || 42) <= tableRect.height - 8
-      ? below
-      : Math.max(8, anchorRect.top - tableRect.top - (previewRect.height || 42) - gap);
-    skillHoverPreview.style.left = `${left}px`;
-    skillHoverPreview.style.top = `${top}px`;
+    const width = Math.min(previewWidth || 300, Math.max(160, tableWidth - 16));
+    const height = Math.min(previewHeight || 42, Math.max(42, tableHeight - 16));
+    const clampLeft = (value) => Math.max(8, Math.min(tableWidth - width - 8, value));
+    const clampTop = (value) => Math.max(8, Math.min(tableHeight - height - 8, value));
+    const anchorCenterX = anchorLeft + anchorWidth / 2;
+    const anchorCenterY = anchorTop + anchorHeight / 2;
+    const anchoredLeft = clampLeft(anchorCenterX - width / 2);
+    const boardRect = board.getBoundingClientRect();
+    const boardBox = {
+      left: (boardRect.left - tableRect.left) / scaleX - gap,
+      top: (boardRect.top - tableRect.top) / scaleY - gap,
+      right: (boardRect.right - tableRect.left) / scaleX + gap,
+      bottom: (boardRect.bottom - tableRect.top) / scaleY + gap,
+    };
+    const boardCenterLeft = clampLeft((boardBox.left + boardBox.right - width) / 2);
+    const candidates = [
+      { placement: 'bottom', left: anchoredLeft, top: clampTop(anchorTop + anchorHeight + gap) },
+      { placement: 'top', left: anchoredLeft, top: clampTop(anchorTop - height - gap) },
+      {
+        placement: 'left',
+        left: clampLeft(anchorLeft - width - gap),
+        top: clampTop(anchorCenterY - height / 2),
+      },
+      {
+        placement: 'right',
+        left: clampLeft(anchorLeft + anchorWidth + gap),
+        top: clampTop(anchorCenterY - height / 2),
+      },
+      { placement: 'board-top', left: boardCenterLeft, top: clampTop(boardBox.top - height - gap) },
+      { placement: 'board-bottom', left: boardCenterLeft, top: clampTop(boardBox.bottom + gap) },
+    ];
+    const intersectionArea = (candidate, box) => Math.max(
+      0,
+      Math.min(candidate.left + width, box.right) - Math.max(candidate.left, box.left),
+    ) * Math.max(
+      0,
+      Math.min(candidate.top + height, box.bottom) - Math.max(candidate.top, box.top),
+    );
+    const anchorBox = {
+      left: anchorLeft - 2,
+      top: anchorTop - 2,
+      right: anchorLeft + anchorWidth + 2,
+      bottom: anchorTop + anchorHeight + 2,
+    };
+    const measuredCandidates = candidates
+      .map((candidate) => {
+        const centerX = candidate.left + width / 2;
+        const centerY = candidate.top + height / 2;
+        const distance = Math.hypot(centerX - anchorCenterX, centerY - anchorCenterY);
+        const boardOverlap = intersectionArea(candidate, boardBox);
+        const anchorOverlap = intersectionArea(candidate, anchorBox);
+        return {
+          ...candidate,
+          boardOverlap,
+          anchorOverlap,
+          score: boardOverlap * 1000 + anchorOverlap * 20 + distance,
+        };
+      });
+    const boardClear = measuredCandidates.filter((candidate) => candidate.boardOverlap <= 1);
+    const anchorClear = boardClear.filter((candidate) => candidate.anchorOverlap <= 1);
+    const best = (anchorClear.length ? anchorClear : boardClear.length ? boardClear : measuredCandidates)
+      .sort((left, right) => left.score - right.score)[0];
+    skillHoverPreview.style.left = `${best.left}px`;
+    skillHoverPreview.style.top = `${best.top}px`;
+    skillHoverPreview.dataset.placement = best.placement;
   }
-  function hideSkillHoverPreview(idx) {
+  function hideSkillHoverPreview(idx, { force = false } = {}) {
     if (idx !== undefined && skillHoverPreview.dataset.playerIdx !== String(idx)) return;
+    if (skillPreviewPinned && !force) return;
     skillHoverPreview.hidden = true;
+    skillHoverPreview.classList.remove('is-pinned');
+    skillHoverPreview.removeAttribute('aria-label');
+    skillPreviewAnchor?.setAttribute('aria-expanded', 'false');
     delete skillHoverPreview.dataset.playerIdx;
+    delete skillHoverPreview.dataset.focusedSkillId;
+    delete skillHoverPreview.dataset.placement;
+    skillPreviewPinned = false;
+    skillPreviewAnchor = null;
+  }
+  function togglePinnedSkillPreview(idx, anchor) {
+    const alreadyOpen = skillPreviewPinned
+      && skillHoverPreview.dataset.playerIdx === String(idx)
+      && skillPreviewAnchor === anchor;
+    if (alreadyOpen) {
+      hideSkillHoverPreview(idx, { force: true });
+      return;
+    }
+    showSkillHoverPreview(idx, anchor, { pinned: true });
   }
   for (const idx of relativeSeats) {
     const seat = seatMap.get(idx);
@@ -1038,9 +1172,13 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
       icon.addEventListener('mouseleave', () => hideSkillHoverPreview(idx));
       icon.addEventListener('focus', () => showSkillHoverPreview(idx, icon));
       icon.addEventListener('blur', () => hideSkillHoverPreview(idx));
-      icon.addEventListener('click', () => {
-        hideSkillHoverPreview(idx);
-        showSkills(idx);
+      icon.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (icon.dataset.longPressed === 'true') {
+          delete icon.dataset.longPressed;
+          return;
+        }
+        togglePinnedSkillPreview(idx, icon);
       });
     }
   }
@@ -1052,7 +1190,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
   passiveButton.addEventListener('mouseleave', () => hideSkillHoverPreview(myIdx));
   passiveButton.addEventListener('focus', () => showSkillHoverPreview(myIdx, passiveButton));
   passiveButton.addEventListener('blur', () => hideSkillHoverPreview(myIdx));
-  const bindSkillLongPress = (target) => {
+  const bindSkillLongPress = (target, idx = myIdx) => {
     let timer = null;
     const cancel = () => {
       if (timer) clearTimeout(timer);
@@ -1063,7 +1201,7 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
       timer = setTimeout(() => {
         timer = null;
         target.dataset.longPressed = 'true';
-        showSkills(myIdx);
+        showSkillHoverPreview(idx, target, { pinned: true });
       }, 520);
     });
     target.addEventListener('pointerup', cancel);
@@ -1072,13 +1210,44 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
   };
   bindSkillLongPress(skillButton);
   bindSkillLongPress(passiveButton);
+  for (const idx of relativeSeats) {
+    const seat = seatMap.get(idx);
+    bindSkillLongPress(seat.skillIcon, idx);
+    bindSkillLongPress(seat.passiveSkillIcon, idx);
+  }
+  const dismissPinnedSkillPreview = (event) => {
+    if (!skillPreviewPinned) return;
+    if (skillHoverPreview.contains(event.target)
+      || event.target.closest?.('.h5-seat__skill, .h5-skill-button, .h5-passive-button')) return;
+    hideSkillHoverPreview(undefined, { force: true });
+  };
+  let skillPreviewResizeFrame = 0;
+  const repositionPinnedSkillPreview = () => {
+    if (!skillPreviewPinned || !skillPreviewAnchor || skillHoverPreview.hidden) return;
+    cancelAnimationFrame(skillPreviewResizeFrame);
+    skillPreviewResizeFrame = requestAnimationFrame(() => {
+      skillPreviewResizeFrame = 0;
+      const idx = Number(skillHoverPreview.dataset.playerIdx);
+      if (Number.isInteger(idx) && idx > 0) {
+        showSkillHoverPreview(idx, skillPreviewAnchor, { pinned: true });
+      }
+    });
+  };
+  const skillPreviewResizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(repositionPinnedSkillPreview) : null;
+  skillPreviewResizeObserver?.observe(table);
+  window.addEventListener('resize', repositionPinnedSkillPreview);
+  document.addEventListener('pointerdown', dismissPinnedSkillPreview);
   myStatsButton.addEventListener('click', () => showPlayer(myIdx));
   passiveButton.addEventListener('click', () => {
     if (passiveButton.dataset.longPressed === 'true') {
       delete passiveButton.dataset.longPressed;
       return;
     }
-    showSkills(myIdx);
+    if (secondSkill?.kind === 'active' && engine.canUseSkill(myIdx, secondSkill.id) && !pending) {
+      hideSkillHoverPreview(undefined, { force: true });
+      openSkillChoice(engine.getSkillPrompt(myIdx, secondSkill.id), secondSkill.id);
+    } else togglePinnedSkillPreview(myIdx, passiveButton);
   });
   chatTab.addEventListener('click', () => selectDockTab('chat'));
   reportTab.addEventListener('click', () => selectDockTab('report'));
@@ -1117,26 +1286,51 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
   function refreshSeatSkills() {
     for (const [idx, seat] of seatMap) {
       const player = players[idx];
-      const active = player?.hero?.skills?.active;
-      if (!player || !active) continue;
-      const charged = player.alive && !player.folded && !player.skillUsed
-        && Number(player.energy) >= Number(active.cost || 0);
-      const possible = charged && Number(engine.actingIdx) === Number(idx);
-      let state = 'idle';
-      let label = '未发动';
-      if (!player.alive) { state = 'dead'; label = '已阵亡'; }
-      else if (player.folded) { state = 'blocked'; label = '已退避'; }
-      else if (player.skillUsed) { state = 'used'; label = '已发动'; }
-      else if (possible) { state = 'possible'; label = '能量充足，可发动'; }
-      else if (charged) { state = 'charged'; label = '能量充足，等待行动'; }
-      seat.skillIcon.dataset.skillState = state;
-      seat.skillIcon.classList.toggle('is-ready', charged);
-      seat.skillStatus.textContent = label;
-      seat.skillIcon.title = `${heroSkillTooltip(player.hero)} · ${label}`;
-      seat.skillIcon.setAttribute(
-        'aria-label',
-        `查看${player.hero.name}技能：${player.hero.skillName}，当前能量${player.energy}，${label}`,
-      );
+      if (!player) continue;
+      const skills = h5HeroSkillSlots(player.hero);
+      const icons = [seat.skillIcon, seat.passiveSkillIcon];
+      icons.forEach((icon, slot) => {
+        const skill = skills[slot];
+        if (!skill) {
+          icon.hidden = true;
+          return;
+        }
+        icon.hidden = false;
+        icon.dataset.skillId = skill.id || '';
+        icon.dataset.skillKind = skill.kind || '';
+        icon.classList.toggle('is-active', skill.kind === 'active');
+        icon.classList.toggle('is-passive', skill.kind !== 'active');
+        const glyph = icon.querySelector('.h5-seat__skill-glyph');
+        if (glyph) glyph.textContent = skillKindGlyph(skill);
+        if (skill.kind !== 'active') {
+          icon.dataset.skillState = 'passive';
+          icon.classList.remove('is-ready');
+          icon.title = `被动【${skill.name}】${skill.description}`;
+          icon.setAttribute('aria-label', `查看${player.hero.name}被动技能：${skill.name}`);
+          return;
+        }
+        const used = Boolean(player.skillData?.used?.[skill.id])
+          || (slot === 0 && player.skillUsed && !player.skillData?.used);
+        const charged = player.alive && !player.folded && !used;
+        let available = false;
+        try {
+          available = Boolean(engine.skillAvailability(idx, skill.id)?.ok);
+        } catch {
+          available = charged && Number(engine.actingIdx) === Number(idx);
+        }
+        let state = 'idle';
+        let label = '未发动';
+        if (!player.alive) { state = 'dead'; label = '已阵亡'; }
+        else if (player.folded) { state = 'blocked'; label = '已退避'; }
+        else if (used) { state = 'used'; label = '已发动'; }
+        else if (available) { state = 'possible'; label = '条件满足，可发动'; }
+        else if (charged) { state = 'charged'; label = '等待条件'; }
+        icon.dataset.skillState = state;
+        icon.classList.toggle('is-ready', available);
+        icon.title = `主动【${skill.name}】${skill.description} · ${label}`;
+        icon.setAttribute('aria-label', `查看${player.hero.name}主动技能：${skill.name}，${label}`);
+        if (slot === 0) seat.skillStatus.textContent = label;
+      });
     }
   }
 
@@ -1148,14 +1342,41 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
     mePanel.classList.toggle('is-dealer', Number(myIdx) === activeDealer);
   }
 
-  function flashSkill(idx) {
-    const node = Number(idx) === Number(myIdx)
-      ? skillButton
-      : seatMap.get(Number(idx))?.skillIcon;
+  function flashSkill(idx, skillId = '') {
+    const skillNodes = Number(idx) === Number(myIdx)
+      ? [skillButton, passiveButton]
+      : [seatMap.get(Number(idx))?.skillIcon, seatMap.get(Number(idx))?.passiveSkillIcon];
+    const slot = h5SkillSlotIndex(players[idx]?.hero, skillId);
+    const node = (slot >= 0 ? skillNodes[slot] : null)
+      || skillNodes.find((item) => item?.dataset.skillId === skillId)
+      || skillNodes.find(Boolean);
     if (!node) return;
     node.classList.remove('is-triggered');
     requestAnimationFrame(() => node.classList.add('is-triggered'));
     setTimeout(() => node.classList.remove('is-triggered'), 900);
+  }
+
+  function presentSkill(idx, skillId, skillName, present = {}, phase = 'cast') {
+    flashSkill(idx, skillId);
+    const player = players[idx];
+    if (present?.sfx) playSFX(present.sfx);
+    feedbackLayer.querySelector('[data-h5-skill-vfx]')?.remove();
+    const effect = element('div', {
+      className: `h5-skill-vfx is-${present?.role || 'control'} is-${phase}`,
+      attrs: {
+        'data-h5-skill-vfx': true,
+        'data-preset': present?.preset || 'skill',
+        'aria-hidden': 'true',
+      },
+    }, [
+      element('span', { className: 'h5-skill-vfx__ring' }),
+      element('span', { className: 'h5-skill-vfx__slash' }),
+      element('strong', { text: skillName || '技能生效' }),
+      element('small', { text: phase === 'cast' ? `${player?.hero?.name || ''} · 发动` : '技能生效' }),
+    ]);
+    effect.style.setProperty('--skill-tone', present?.tone || player?.hero?.color || '#e7c25d');
+    feedbackLayer.append(effect);
+    setTimeout(() => effect.remove(), phase === 'cast' ? 1300 : 1000);
   }
 
   function updatePot() {
@@ -1546,21 +1767,40 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
 
   function refreshSkill() {
     if (destroyed) return;
-    const available = engine.skillAvailability(myIdx);
+    const available = primarySkill?.kind === 'active'
+      ? engine.skillAvailability(myIdx, primarySkill.id)
+      : { ok: false, reason: '被动技能满足条件后自动触发' };
     const isMyAction = Number(engine.actingIdx) === Number(myIdx)
       && Number(engine.waitingIdx) === Number(myIdx);
-    const ready = available.ok && isMyAction && !pending;
-    skillName.textContent = me.hero.skillName;
-    skillButton.setAttribute('aria-disabled', String(!ready));
-    const state = ready ? 'ready'
-      : me.skillUsed ? 'used'
+    const insuranceReady = ['lvbuwei_qihuo', 'lvbuwei_shangdao'].includes(primarySkill?.id)
+      && available.ok;
+    const ready = available.ok && (isMyAction || insuranceReady) && !pending;
+    const primaryUsed = Boolean(me.skillData?.used?.[primarySkill?.id])
+      || (!me.skillData?.used && Boolean(me.skillUsed));
+    skillName.textContent = primarySkill?.name || me.hero.skillName;
+    skillButton.setAttribute('aria-disabled', String(primarySkill?.kind === 'active' && !ready));
+    const state = primarySkill?.kind !== 'active' ? 'passive'
+      : ready ? 'ready'
+      : primaryUsed ? 'used'
         : !isMyAction ? 'waiting' : 'blocked';
     skillButton.dataset.skillState = state;
     skillButton.classList.toggle('is-ready', ready);
-    skillState.textContent = ready
+    skillState.textContent = primarySkill?.kind !== 'active'
+      ? '被动技能满足条件后自动触发'
+      : ready
       ? '可发动'
-      : !isMyAction ? '仅可在轮到你行动时发动' : available.reason || '';
+      : !isMyAction && !insuranceReady ? '仅可在轮到你行动时发动' : available.reason || '';
     skillState.classList.toggle('is-ready', ready);
+    const secondAvailable = secondSkill?.kind === 'active'
+      ? engine.skillAvailability(myIdx, secondSkill.id) : null;
+    const secondInsuranceReady = ['lvbuwei_qihuo', 'lvbuwei_shangdao'].includes(secondSkill?.id)
+      && !!secondAvailable?.ok;
+    const secondReady = !!secondAvailable?.ok && (isMyAction || secondInsuranceReady) && !pending;
+    passiveButton.classList.toggle('is-ready', secondReady);
+    passiveButton.dataset.skillState = secondSkill?.kind === 'active'
+      ? (secondReady ? 'ready' : me.skillData?.used?.[secondSkill.id] ? 'used' : 'blocked')
+      : 'passive';
+    passiveButton.setAttribute('aria-disabled', String(secondSkill?.kind === 'active' && !secondReady));
     refreshSeatSkills();
   }
 
@@ -1902,9 +2142,10 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
 
   extend.addEventListener('click', () => {
     if (!awaiting || pending) return;
-    if (engine.extendTime(myIdx)) {
-      timeLeft += Config.EXTEND_TIME;
-      timerTotal = Math.max(timeLeft, timerTotal + Config.EXTEND_TIME);
+    const extension = engine.extendTime(myIdx);
+    if (extension) {
+      timeLeft += extension;
+      timerTotal = Math.max(timeLeft, timerTotal + extension);
       extend.disabled = true;
       renderActionCountdown();
     }
@@ -1944,15 +2185,22 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
       actionButtons[slot].textContent = tier ? `${tier.name} ${tier.cost}` : ACTION_LABELS[tierKey];
     }
     for (const [key, item] of Object.entries(actionButtons)) item.disabled = !actionMap.has(key);
-    extend.disabled = me.energy < Config.EXTEND_COST;
+    const extension = Math.max(
+      0,
+      Number(me.skillData?.currentExtendSeconds ?? Config.EXTEND_TIME) || 0,
+    );
+    extend.textContent = `+${extension}秒·1⚡`;
+    extend.title = `延时${extension}秒 · 消耗1⚡`;
+    extend.setAttribute('aria-label', extend.title);
+    extend.disabled = me.energy < Config.EXTEND_COST || extension <= 0;
     hintText.textContent = '轮到你行动';
     renderActionCountdown();
     refreshAdvisor();
   }
 
-  function openSkillChoice(input) {
+  function openSkillChoice(input, selectedSkillId = null) {
     if (!input?.fields?.length) {
-      engine.useSkill(myIdx);
+      engine.useSkill(myIdx, null, selectedSkillId);
       return;
     }
     let index = 0;
@@ -1974,15 +2222,17 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
               attrs: { 'data-testid': 'h5-confirm-skill' },
               on: {
                 click: () => {
-                  if (Number(engine.waitingIdx) !== Number(myIdx)
-                    || Number(engine.actingIdx) !== Number(myIdx)
-                    || !engine.canUseSkill(myIdx)) {
+                  const specialWindow = ['lvbuwei_qihuo', 'lvbuwei_shangdao'].includes(selectedSkillId)
+                    && engine.canUseSkill(myIdx, selectedSkillId);
+                  if ((!specialWindow && (Number(engine.waitingIdx) !== Number(myIdx)
+                    || Number(engine.actingIdx) !== Number(myIdx)))
+                    || !engine.canUseSkill(myIdx, selectedSkillId)) {
                     closeDrawer();
                     refreshSkill();
                     return;
                   }
                   closeDrawer();
-                  engine.useSkill(myIdx, selection);
+                  engine.useSkill(myIdx, selection, selectedSkillId);
                 },
               },
             }),
@@ -2024,14 +2274,33 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
       delete skillButton.dataset.longPressed;
       return;
     }
-    if (Number(engine.waitingIdx) !== Number(myIdx)
-      || Number(engine.actingIdx) !== Number(myIdx)
-      || !engine.canUseSkill(myIdx)
-      || pending) return;
-    openSkillChoice(engine.getSkillPrompt(myIdx));
+    if (primarySkill?.kind !== 'active') {
+      togglePinnedSkillPreview(myIdx, skillButton);
+      return;
+    }
+    const specialWindow = ['lvbuwei_qihuo', 'lvbuwei_shangdao'].includes(primarySkill?.id)
+      && engine.canUseSkill(myIdx, primarySkill.id);
+    if ((!specialWindow && (Number(engine.waitingIdx) !== Number(myIdx)
+      || Number(engine.actingIdx) !== Number(myIdx)))
+      || !engine.canUseSkill(myIdx, primarySkill?.id)
+      || pending) {
+      togglePinnedSkillPreview(myIdx, skillButton);
+      return;
+    }
+    hideSkillHoverPreview(undefined, { force: true });
+    openSkillChoice(engine.getSkillPrompt(myIdx, primarySkill?.id), primarySkill?.id);
   });
 
   bindListener('onSync', refreshAll);
+  bindListener('onInsuranceWindow', (window) => {
+    refreshAll();
+    if (Number(window?.sellerIdx) !== Number(myIdx)) return;
+    const skillId = window.phase === 'second' ? 'lvbuwei_shangdao' : 'lvbuwei_qihuo';
+    addLog(`保险交易窗口开启 · ${window.seconds || 6}秒`, 'skill');
+    if (engine.canUseSkill(myIdx, skillId)) {
+      openSkillChoice(engine.getSkillPrompt(myIdx, skillId), skillId);
+    }
+  });
   bindListener('onLog', addLog);
   bindListener('chat', appendChatMessage);
   bindListener('onRoundStart', (round, blinds, dealerIdx) => {
@@ -2135,17 +2404,27 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
       refreshAdvisor();
     }
   });
-  bindListener('onSkill', (idx, _skillId, skillName) => {
-    flashSkill(idx);
+  bindListener('onSkill', (idx, skillId, skillName, presentation) => {
+    presentSkill(idx, skillId, skillName, presentation, 'cast');
     addLog(`${players[idx].hero.name} 发动【${skillName}】`, 'skill');
     hintText.textContent = `【${skillName}】发动`;
   });
-  bindListener('onPassive', (idx, _skillId, skillName) => {
-    flashSkill(idx);
+  bindListener('onPassive', (idx, skillId, skillName, presentation) => {
+    presentSkill(idx, skillId, skillName, presentation, 'passive');
     addLog(`${players[idx].hero.name} 被动【${skillName}】生效`, 'skill');
   });
-  bindListener('onSkillEffect', (idx, _skillId, skillName) => addLog(`${players[idx].hero.name}【${skillName}】结算`, 'skill'));
-  bindListener('onQuote', (idx, text) => addLog(`${players[idx].hero.name}：「${text}」`, 'quote'));
+  bindListener('onSkillEffect', (idx, skillId, skillName, presentation) => {
+    presentSkill(idx, skillId, skillName, presentation, 'effect');
+    addLog(`${players[idx].hero.name}【${skillName}】结算`, 'skill');
+  });
+  bindListener('onQuote', (idx, text, meta) => {
+    addLog(`${players[idx].hero.name}：「${text}」`, 'quote');
+    speakCharacterLine(text, {
+      gender: players[idx]?.hero?.gender,
+      role: meta?.presentation?.role || 'control',
+      intensity: meta?.presentation?.intensity || 'medium',
+    });
+  });
   bindListener('onSkillResult', (idx, result) => {
     if (idx !== myIdx || !result) return;
     if (result.card) hintText.textContent = `技能结果：${cardText(result.card)}`;
@@ -2282,6 +2561,10 @@ export function mountH5Battle({ root, battle, myIdx = 1, onGameOver, onLeave }) 
     },
     destroy() {
       destroyed = true;
+      document.removeEventListener('pointerdown', dismissPinnedSkillPreview);
+      window.removeEventListener('resize', repositionPinnedSkillPreview);
+      skillPreviewResizeObserver?.disconnect();
+      cancelAnimationFrame(skillPreviewResizeFrame);
       clearTransientFeedback();
       closeDrawer();
       for (const [name, previous] of previousListeners) {

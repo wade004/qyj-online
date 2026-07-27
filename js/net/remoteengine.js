@@ -80,7 +80,11 @@ export class RemoteEngine {
         skillUsed: false,
         skillStatuses: [],
         passiveUsed: Object.create(null),
-        skillData: { flags: Object.create(null), copiedPassiveIds: [], revealedCard: null, raisedThisRound: false },
+        skillData: {
+          used: Object.create(null), flags: Object.create(null),
+          raisedThisRound: false, sizingHistory: [],
+        },
+        skillMatchUsed: Object.create(null),
         showdownInfo: null,
       };
     }
@@ -100,6 +104,7 @@ export class RemoteEngine {
     this.actionClock = null;
     this.gameOver = false;
     this.lastRanking = null;
+    this.skillState = null;
     this.time = 0;
     this.queue = [];
   }
@@ -142,14 +147,33 @@ export class RemoteEngine {
   activePlayers() {
     return this.players.slice(1).filter((p) => p.alive && !p.folded);
   }
-  canUseSkill(idx) {
-    return getSkillAvailability(this, this.players[idx]).ok;
+  getOptions(player) {
+    const toCall = Math.max(0, this.currentBet - (player?.betStreet || 0));
+    const callAmt = Math.min(toCall, player?.hp || 0);
+    const pot = Math.max(1, this.totalPot());
+    const minRaise = Math.max(1, Config.getBlinds(Math.max(1, this.round || 1)).bb);
+    const canRaise = !!player && !player.allIn && player.hp > toCall;
+    return {
+      toCall,
+      canCheck: toCall === 0,
+      callAmt,
+      allinAmt: player?.hp || 0,
+      canRaise,
+      canAllIn: !!player && player.hp > 0,
+      tiers: canRaise ? Config.ATTACK_TIERS.map((tier) => {
+        const inc = Math.max(minRaise, Config.roundAmount(pot * tier.ratio));
+        return { key: tier.key, name: tier.name, inc, cost: toCall + inc };
+      }).filter((tier) => tier.cost < player.hp) : [],
+    };
   }
-  skillAvailability(idx) {
-    return getSkillAvailability(this, this.players[idx]);
+  canUseSkill(idx, skillId = null) {
+    return getSkillAvailability(this, this.players[idx], skillId).ok;
   }
-  getSkillPrompt(idx) {
-    return getSkillInput(this, this.players[idx]);
+  skillAvailability(idx, skillId = null) {
+    return getSkillAvailability(this, this.players[idx], skillId);
+  }
+  getSkillPrompt(idx, skillId = null) {
+    return getSkillInput(this, this.players[idx], skillId);
   }
 
   // ---- 行动转发 ----
@@ -158,12 +182,14 @@ export class RemoteEngine {
     if (this.waitingIdx !== this.myIdx) return false;
     return this.send({ cmd: 'act', type: act.type, tierKey: act.tier ? act.tier.key : undefined }) !== false;
   }
-  useSkill(idx, selection = null) {
+  useSkill(idx, selection = null, skillId = null) {
+    const specialWindow = ['lvbuwei_qihuo', 'lvbuwei_shangdao'].includes(skillId)
+      && this.canUseSkill(idx, skillId);
     if (Number(idx) !== Number(this.myIdx)
-      || Number(this.actingIdx) !== Number(this.myIdx)
-      || Number(this.waitingIdx) !== Number(this.myIdx)
-      || !this.canUseSkill(idx)) return false;
-    this.send({ cmd: 'skill', selection: selection || undefined });
+      || (!specialWindow && (Number(this.actingIdx) !== Number(this.myIdx)
+        || Number(this.waitingIdx) !== Number(this.myIdx)))
+      || !this.canUseSkill(idx, skillId)) return false;
+    this.send({ cmd: 'skill', skillId: skillId || undefined, selection: selection || undefined });
     return true;
   }
   extendTime() {
@@ -222,6 +248,14 @@ export class RemoteEngine {
     }
     this.revealed = s.revealed ?? this.revealed;
     if (s.board) this.board = s.board.map(card);
+    if (Object.prototype.hasOwnProperty.call(s, 'skillState')) {
+      this.skillState = s.skillState?.insuranceOffer ? {
+        insuranceOffer: {
+          ...s.skillState.insuranceOffer,
+          buyers: [...(s.skillState.insuranceOffer.buyers || [])],
+        },
+      } : null;
+    }
     if (s.players) {
       for (const sp of s.players) {
         const p = this.players[sp.seat];
@@ -236,6 +270,11 @@ export class RemoteEngine {
             : null;
         }
         p.skillUsed = sp.skillUsed;
+        p.skillData.used = { ...(sp.skillUses || {}) };
+        if (Object.prototype.hasOwnProperty.call(sp, 'extendSeconds')) {
+          p.skillData.currentExtendSeconds = Number(sp.extendSeconds) || 0;
+        }
+        p.skillMatchUsed = { ...(sp.skillMatchUsed || {}) };
         p.skillStatuses = (sp.skillModifiers || []).map((status) => ({ ...status }));
       }
     }
@@ -375,6 +414,11 @@ export class RemoteEngine {
       if (L.onSync) L.onSync();
       return;
     }
+    if (ev === 'onInsuranceWindow') {
+      if (L.onInsuranceWindow) L.onInsuranceWindow(a);
+      if (L.onSync) L.onSync();
+      return;
+    }
     if (ev === 'onShowdown') {
       const entrants = [];
       for (const e of a.entrants || []) {
@@ -410,7 +454,7 @@ export class RemoteEngine {
         case 'onSkill': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
         case 'onPassive': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
         case 'onSkillEffect': handler(a.idx, a.skillId, a.skillName, a.presentation); break;
-        case 'onQuote': handler(a.idx, a.text); break;
+        case 'onQuote': handler(a.idx, a.text, a.meta || null); break;
         case 'onSkillResult': {
           const result = { ...a.result };
           if (result.card) result.card = card(result.card);

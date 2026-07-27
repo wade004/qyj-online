@@ -722,11 +722,11 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
     await user.page.getByTestId('h5-chat-tab').click();
     await expect(user.page.getByTestId('h5-chat-panel')).toBeVisible();
 
-    await expect(user.page.locator('.h5-seat__skill-glyph')).toHaveText([
-      '主', '被', '主', '被', '主', '被', '主', '被', '主', '被',
-    ]);
+    const opponentSkillGlyphs = await user.page.locator('.h5-seat__skill-glyph').allTextContents();
+    expect(opponentSkillGlyphs).toHaveLength(10);
+    expect(opponentSkillGlyphs.every((glyph) => ['主', '被'].includes(glyph))).toBe(true);
     await expect(user.page.getByTestId('h5-skill-icon')).toHaveText('主');
-    await expect(user.page.getByTestId('h5-passive-skill').locator('.h5-passive-button__icon')).toHaveText('被');
+    await expect(user.page.getByTestId('h5-passive-skill').locator('.h5-passive-button__icon')).toHaveText('主');
     await expect(user.page.locator('[data-testid^="h5-seat-passive-skill-"]')).toHaveCount(5);
     await expect(user.page.locator('.h5-stats-icon')).toHaveCount(6);
     await expect(user.page.locator('.h5-me__hero-name')).toHaveText('诸葛亮');
@@ -758,8 +758,8 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
       const opponentName = rect('.h5-seat__name');
       const opponentHp = rect('.h5-seat__hp');
       const opponentEnergy = rect('.h5-seat__energy');
-      const opponentActiveSkill = rect('.h5-seat__skill:not(.h5-seat__skill--passive)');
-      const opponentPassiveSkill = rect('.h5-seat__skill--passive');
+      const opponentActiveSkill = rect('.h5-seat__skill--primary');
+      const opponentPassiveSkill = rect('.h5-seat__skill--secondary');
       const selfActiveSkill = rect('.h5-me__skills > .h5-skill-button');
       const selfPassiveSkill = rect('.h5-me__skills > .h5-passive-button');
       const dealer = document.querySelector('.is-dealer');
@@ -908,22 +908,56 @@ test('联网单人玩法：一名真人创建 6 人桌，服务器补 5 名 AI �
     }
     await user.page.setViewportSize({ width: 844, height: 390 });
 
-    const opponentSkill = user.page.locator('.h5-seat__skill').first();
+    const opponentSkill = user.page.locator('.h5-seat--3 .h5-seat__skill--primary');
     await opponentSkill.hover();
     await expect(user.page.locator('.h5-seat-skill-preview')).toBeVisible();
     const tooltipContract = await user.page.evaluate(() => {
-      const icon = document.querySelector('.h5-seat__skill').getBoundingClientRect();
-      const tip = document.querySelector('.h5-seat-skill-preview').getBoundingClientRect();
+      const iconNode = document.querySelector('.h5-seat--3 .h5-seat__skill--primary');
+      const tipNode = document.querySelector('.h5-seat-skill-preview');
+      const icon = iconNode.getBoundingClientRect();
+      const tip = tipNode.getBoundingClientRect();
       const table = document.querySelector('.h5-table').getBoundingClientRect();
+      const board = document.querySelector('.h5-board').getBoundingClientRect();
+      const focused = tipNode.querySelector('.h5-unified-skill-display__item.is-focused');
+      const overlapArea = (left, right) => Math.max(
+        0,
+        Math.min(left.right, right.right) - Math.max(left.left, right.left),
+      ) * Math.max(
+        0,
+        Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top),
+      );
+      const horizontalGap = Math.max(icon.left - tip.right, tip.left - icon.right, 0);
+      const verticalGap = Math.max(icon.top - tip.bottom, tip.top - icon.bottom, 0);
       return {
-        nearby: Math.hypot((tip.left + tip.width / 2) - (icon.left + icon.width / 2),
-          (tip.top + tip.height / 2) - (icon.top + icon.height / 2)) < 260,
+        nearby: Math.hypot(horizontalGap, verticalGap) < 100,
         inside: tip.left >= table.left - 1 && tip.right <= table.right + 1
           && tip.top >= table.top - 1 && tip.bottom <= table.bottom + 1,
+        boardClear: overlapArea(tip, board) <= 1,
+        iconClear: overlapArea(tip, icon) <= 1,
+        focusedId: focused?.dataset.skillId || '',
+        focusedKind: focused?.dataset.skillKind || '',
+        anchorId: iconNode.dataset.skillId || '',
+        anchorKind: iconNode.dataset.skillKind || '',
+        placement: tipNode.dataset.placement || '',
+        itemCount: document.querySelectorAll(
+          '.h5-seat-skill-preview .h5-unified-skill-display__item',
+        ).length,
         zIndex: Number(getComputedStyle(document.querySelector('.h5-seat-skill-preview')).zIndex),
       };
     });
-    expect(tooltipContract).toMatchObject({ nearby: true, inside: true, zIndex: 1000 });
+    expect(tooltipContract).toMatchObject({
+      nearby: true,
+      inside: true,
+      boardClear: true,
+      iconClear: true,
+      itemCount: 2,
+      zIndex: 1000,
+    });
+    expect(tooltipContract.focusedId).toBe(tooltipContract.anchorId);
+    expect(tooltipContract.focusedKind).toBe(tooltipContract.anchorKind);
+    expect(tooltipContract.placement).not.toBe('');
+    await opponentSkill.click();
+    await expect(user.page.locator('.h5-seat-skill-preview')).toHaveClass(/is-pinned/);
 
     await user.page.setViewportSize({ width: 1366, height: 768 });
     await expect.poll(() => user.page.evaluate(() => Number(

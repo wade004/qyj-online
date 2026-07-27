@@ -104,10 +104,12 @@ export class BattleSession {
   activePlayers() { return this.rawEngine.activePlayers(); }
   playerAct(action) { return this.rawEngine.playerAct(action); }
   extendTime(idx) { return this.rawEngine.extendTime(idx); }
-  canUseSkill(idx) { return this.rawEngine.canUseSkill(idx); }
-  skillAvailability(idx) { return this.rawEngine.skillAvailability(idx); }
-  getSkillPrompt(idx) { return this.rawEngine.getSkillPrompt(idx); }
-  useSkill(idx, selection = null) { return this.rawEngine.useSkill(idx, selection); }
+  canUseSkill(idx, skillId = null) { return this.rawEngine.canUseSkill(idx, skillId); }
+  skillAvailability(idx, skillId = null) { return this.rawEngine.skillAvailability(idx, skillId); }
+  getSkillPrompt(idx, skillId = null) { return this.rawEngine.getSkillPrompt(idx, skillId); }
+  useSkill(idx, selection = null, skillId = null) {
+    return this.rawEngine.useSkill(idx, selection, skillId);
+  }
   sendChat(text) { return this.rawEngine.sendChat?.(text) ?? false; }
 
   onMessage(message) {
@@ -118,7 +120,9 @@ export class BattleSession {
 
   dispatch(command, payload = {}) {
     if (command === 'action') return this.playerAct(payload.action || payload);
-    if (command === 'skill') return this.useSkill(payload.idx, payload.selection || null);
+    if (command === 'skill') {
+      return this.useSkill(payload.idx, payload.selection || null, payload.skillId || null);
+    }
     if (command === 'extend') return this.extendTime(payload.idx);
     throw new Error(`Unsupported battle command: ${command}`);
   }

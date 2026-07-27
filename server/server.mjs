@@ -728,12 +728,14 @@ export function startServer(port = 8790, {
   }
 
   function startActionClock(game, idx) {
+    const duration = game?.engine?.getActionTime?.(game.engine.players[idx], Config.ACTION_TIME)
+      || Config.ACTION_TIME;
     game.actionClockSeq = (Number(game.actionClockSeq) || 0) + 1;
     game.actionClock = {
       turnId: game.actionClockSeq,
       idx: Number(idx),
-      remaining: Config.ACTION_TIME,
-      total: Config.ACTION_TIME,
+      remaining: duration,
+      total: duration,
     };
     return game.actionClock;
   }
@@ -767,6 +769,9 @@ export function startServer(port = 8790, {
         betStreet: p.betStreet, betRound: p.betRound, acted: !!p.acted,
         lastAction: p.lastAction ? { ...p.lastAction } : null,
         skillUsed: p.skillUsed,
+        skillUses: p.skillData?.used ? { ...p.skillData.used } : {},
+        skillMatchUsed: p.skillMatchUsed ? { ...p.skillMatchUsed } : {},
+        extendSeconds: p.skillData?.currentExtendSeconds ?? Config.EXTEND_TIME,
         skillModifiers: p.skillStatuses
           .filter((status) => status.modifier)
           .map((status) => ({ modifier: status.modifier, amount: status.amount || 0 })),
@@ -781,6 +786,16 @@ export function startServer(port = 8790, {
       actingIdx: e.actingIdx || 0,
       waitingIdx: e.waitingIdx,
       actionClock: actionClockPayload(game),
+      skillState: e.skillState?.insuranceOffer ? {
+        insuranceOffer: {
+          sellerIdx: e.skillState.insuranceOffer.sellerIdx,
+          buyers: [...(e.skillState.insuranceOffer.buyers || [])],
+          round: e.skillState.insuranceOffer.round,
+          street: e.skillState.insuranceOffer.street,
+          secondTranche: !!e.skillState.insuranceOffer.secondTranche,
+          secondTranchePending: !!e.skillState.insuranceOffer.secondTranchePending,
+        },
+      } : null,
       revealed: e.revealed, board, players,
     };
   }
@@ -893,13 +908,13 @@ export function startServer(port = 8790, {
     L.onAwaitAction = (idx, opts) => {
       game.awaitSeat = idx;
       game.lastOpts = opts;
-      game.awaitTotal = Config.ACTION_TIME;
+      game.awaitTotal = game.actionClock?.total || Config.ACTION_TIME;
       const m = game.seatToClient.get(idx);
       if (game.detachedSeats?.has(idx)) {
         game.awaitLeft = 0;
         if (game.actionClock?.idx === idx) {
           game.actionClock.remaining = 0;
-          game.actionClock.total = Config.ACTION_TIME;
+          game.actionClock.total = game.awaitTotal;
         }
         publishActionClock(team);
         queueMicrotask(() => {
@@ -909,7 +924,7 @@ export function startServer(port = 8790, {
           }
         });
       } else if (m?.connected && clients.get(m.id) === m) {
-        game.awaitLeft = Config.ACTION_TIME;
+        game.awaitLeft = game.awaitTotal;
         if (game.actionClock?.idx === idx) {
           game.actionClock.remaining = game.awaitLeft;
           game.actionClock.total = game.awaitTotal;
@@ -957,7 +972,8 @@ export function startServer(port = 8790, {
       fwd('onPassive', { idx, skillId, skillName, presentation });
     L.onSkillEffect = (idx, skillId, skillName, presentation) =>
       fwd('onSkillEffect', { idx, skillId, skillName, presentation });
-    L.onQuote = (idx, text) => fwd('onQuote', { idx, text });
+    L.onInsuranceWindow = (window) => fwd('onInsuranceWindow', window);
+    L.onQuote = (idx, text, meta = null) => fwd('onQuote', { idx, text, meta });
     L.onSkillResult = (idx, result) =>
       sendToSeat(game, idx, { ev: 'onSkillResult', a: { idx, result: skillResultJ(result) } });
     L.onSkillPublicResult = (idx, result) => {
@@ -1634,14 +1650,23 @@ export function startServer(port = 8790, {
         return fail(client, ERROR_CODES.GAME_NOT_FOUND, '当前没有进行中的对局');
       }
       const game = team.game;
-      if (game.awaitSeat !== client.seat
+      const skillId = typeof msg.skillId === 'string' ? msg.skillId : null;
+      const specialWindow = ['lvbuwei_qihuo', 'lvbuwei_shangdao'].includes(skillId)
+        && game.engine.skillAvailability(client.seat, skillId).ok;
+      if (!specialWindow && (game.awaitSeat !== client.seat
         || game.engine.waitingIdx !== client.seat
-        || game.engine.actingIdx !== client.seat) {
+        || game.engine.actingIdx !== client.seat)) {
         return fail(client, ERROR_CODES.NOT_YOUR_TURN, '当前不是你的行动回合');
       }
       const raw = msg.selection && typeof msg.selection === 'object' ? msg.selection : {};
       const selection = {};
       if (typeof raw.choice === 'string' || Number.isInteger(raw.choice)) selection.choice = raw.choice;
+      if (typeof raw.rankBand === 'string') selection.rankBand = raw.rankBand;
+      if (typeof raw.suitPair === 'string') selection.suitPair = raw.suitPair;
+      if (typeof raw.copySkillId === 'string') selection.copySkillId = raw.copySkillId;
+      if (Number.isFinite(Number(raw.ratio))) selection.ratio = Number(raw.ratio);
+      if (Number.isFinite(Number(raw.coverage))) selection.coverage = Number(raw.coverage);
+      if (raw.cardIndex === 1 || raw.cardIndex === 2) selection.cardIndex = raw.cardIndex;
       if (Number.isInteger(raw.targetIdx)) {
         const tableSize = SUPPORTED_TABLE_SIZE_SET.has(game.engine.tableSize)
           ? game.engine.tableSize : tableSizeOf(game);
@@ -1650,7 +1675,7 @@ export function startServer(port = 8790, {
         }
         selection.targetIdx = raw.targetIdx;
       }
-      if (!game.engine.useSkill(client.seat, selection)) {
+      if (!game.engine.useSkill(client.seat, selection, skillId)) {
         return fail(client, ERROR_CODES.SKILL_REJECTED, '当前不能发动该技能');
       }
 
@@ -1663,9 +1688,10 @@ export function startServer(port = 8790, {
       if (game.awaitSeat !== client.seat) {
         return fail(client, ERROR_CODES.NOT_YOUR_TURN, '当前不是你的行动回合');
       }
-      if (game.engine.extendTime(client.seat)) {
-        game.awaitLeft += Config.EXTEND_TIME;
-        game.awaitTotal = Math.max(Config.ACTION_TIME, game.awaitTotal) + Config.EXTEND_TIME;
+      const extension = game.engine.extendTime(client.seat);
+      if (extension) {
+        game.awaitLeft += extension;
+        game.awaitTotal += extension;
         if (game.actionClock?.idx === client.seat) {
           game.actionClock.remaining = game.awaitLeft;
           game.actionClock.total = game.awaitTotal;
